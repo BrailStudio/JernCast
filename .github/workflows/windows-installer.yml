@@ -1,0 +1,53 @@
+name: JernCast Windows installer
+
+# Run it from the Actions tab: "JernCast Windows installer" -> Run workflow.
+# The installer appears under "Artifacts" when it finishes (about 5-10 minutes).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Get FFmpeg
+        shell: pwsh
+        run: scripts\get-ffmpeg.ps1
+
+      - name: Tests (informational)
+        shell: pwsh
+        continue-on-error: true
+        env:
+          JERNCAST_FFMPEG: ${{ github.workspace }}\tools\ffmpeg.exe
+        run: python -m unittest discover -s tests -v
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build app and installer
+        shell: pwsh
+        run: scripts\build-windows.ps1 -Installer
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jerncast-0.0.1-Setup
+          path: dist/Jerncast-0.0.1-Setup.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JernCast-portable
+          path: dist/JernCast
