@@ -30,8 +30,14 @@ Copy-Item LICENSE, THIRD_PARTY.md dist\JernCast\ -Force
 Write-Host 'Built: dist\JernCast\JernCast.exe'
 
 if ($Installer) {
-    $iscc = @("$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-              "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    # ${env:ProgramFiles(x86)} needs the braces: the "(x86)" is part of the variable's name.
+    $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+              "${env:LOCALAPPDATA}\Programs\Inno Setup 6\ISCC.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $iscc) {
+        $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+        if ($cmd) { $iscc = $cmd.Source }
+    }
     if (-not $iscc) { throw 'Inno Setup 6 not found (https://jrsoftware.org/isdl.php or: choco install innosetup).' }
     & $iscc installer\jerncast.iss
     if ($LASTEXITCODE) { throw 'installer build failed' }
