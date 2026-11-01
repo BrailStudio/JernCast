@@ -1,5 +1,5 @@
 <#
-  Builds dist\JernCast\JernCast.exe (and, with -Installer, dist\Jerncast-0.0.1-Setup.exe).
+  Builds dist\JernCast\JernCast.exe (and, with -Installer, dist\Jerncast-0.0.2-Setup.exe).
   Needs Python 3.10+ from python.org (tick "Add python.exe to PATH" and keep "tcl/tk" ticked).
   Works fine with 4 GB of RAM.
 
@@ -21,8 +21,13 @@ if ($LASTEXITCODE) { throw 'This Python has no tkinter. Reinstall Python and kee
 python -m pip install --upgrade pip pyinstaller
 if ($LASTEXITCODE) { throw 'pip failed' }
 
+# System sound capture (what the PC plays). Optional: without it JernCast still works,
+# and desktop sound then needs Stereo Mix or a virtual audio cable.
+python -m pip install pyaudiowpatch
+if ($LASTEXITCODE) { Write-Warning 'pyaudiowpatch could not be installed: no system sound capture in this build.' }
+
 python -m PyInstaller --noconfirm --clean --windowed --name JernCast `
-    --icon assets\jerncast.ico --add-data "assets;assets" jerncast_app.py
+    --icon assets\jerncast.ico --add-data "assets;assets" --hidden-import pyaudiowpatch jerncast_app.py
 if ($LASTEXITCODE) { throw 'PyInstaller failed' }
 
 Copy-Item tools\ffmpeg.exe dist\JernCast\ffmpeg.exe -Force
@@ -41,5 +46,5 @@ if ($Installer) {
     if (-not $iscc) { throw 'Inno Setup 6 not found (https://jrsoftware.org/isdl.php or: choco install innosetup).' }
     & $iscc installer\jerncast.iss
     if ($LASTEXITCODE) { throw 'installer build failed' }
-    Write-Host 'Built: dist\Jerncast-0.0.1-Setup.exe'
+    Write-Host 'Built: dist\Jerncast-0.0.2-Setup.exe'
 }

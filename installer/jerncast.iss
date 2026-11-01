@@ -1,6 +1,6 @@
 ; Inno Setup script. Build with: scripts\build-windows.ps1 -Installer
 #define AppName "JernCast"
-#define AppVersion "0.0.1"
+#define AppVersion "0.0.2"
 
 [Setup]
 AppId={{6E0C3F52-4B1D-4C8A-9D27-5A1F0E7B9C41}

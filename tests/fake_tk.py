@@ -116,6 +116,9 @@ class Canvas(Widget):
     def create_text(self, *a, **k):
         self.drawn.append(("text", k.get("text")))
 
+    def create_image(self, *a, **k):
+        self.drawn.append(("image", a))
+
 
 class Scale(Widget):
     def set(self, v):
@@ -129,8 +132,8 @@ def install():
     """Return the fake modules; use with mock.patch.dict(sys.modules, ...)."""
     tk = types.ModuleType("tkinter")
     tk.TclError = type("TclError", (Exception,), {})
-    tk.StringVar = tk.BooleanVar = Var
-    for name, cls in (("Tk", Widget), ("Toplevel", Widget), ("Label", Widget), ("Menu", Widget),
+    tk.StringVar = tk.BooleanVar = tk.IntVar = Var
+    for name, cls in (("Tk", Widget), ("Toplevel", Widget), ("Frame", Widget), ("Label", Widget), ("Menu", Widget),
                       ("PhotoImage", Widget), ("Listbox", Listbox), ("Canvas", Canvas), ("Scale", Scale)):
         setattr(tk, name, cls)
     ttk = types.ModuleType("tkinter.ttk")

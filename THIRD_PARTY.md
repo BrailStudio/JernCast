@@ -9,3 +9,6 @@ available from FFmpeg and from the BtbN project above.
 JernCast's own code (the `jerncast` folder) is MIT licensed, see `LICENSE`.
 The installer's Python runtime and Tk are under the Python Software
 Foundation licence; PyInstaller is used to package the app.
+
+System sound capture uses **PyAudioWPatch** (MIT licence, based on PyAudio and PortAudio), a Windows
+WASAPI loopback fork of PyAudio: https://github.com/s0d3s/PyAudioWPatch

@@ -1,5 +1,6 @@
 """Presses the window's buttons through a fake tkinter and checks what happens."""
 import importlib
+import json
 import os
 import shutil
 import sys
@@ -11,24 +12,28 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 import fake_tk  # noqa: E402
 
-from jerncast import core  # noqa: E402
-from jerncast.project import Project  # noqa: E402
+from jerncast import core, loopback, project as project_module  # noqa: E402
+from jerncast.layouts import layout_scene_name  # noqa: E402
+from jerncast.project import Capture  # noqa: E402
+
+REAL_RESOLVE = project_module.resolve
+
+
+def fake_resolve(src, monitors, cursor=True, loopback=None):
+    """On this test machine: the 'screen' is a red picture, the 'webcam' a blue one, the mic a beep."""
+    if src.kind in ("display", "window"):
+        return Capture("test_color", "red")
+    if src.kind == "webcam":
+        return Capture("test_color", "blue")
+    if src.kind == "audio":
+        return Capture("test_audio", "440")
+    return REAL_RESOLVE(src, monitors, cursor, loopback)
 
 
 def wait_idle(app, timeout=40):
-    """Run the window's event loop by hand until the background action finishes."""
     end = time.time() + timeout
     while time.time() < end:
-        app._tick_once = True
-        try:
-            while True:
-                event = app.events.get_nowait()
-                if event[0] == "done":
-                    app._finish_bg(*event[1:])
-                elif event[0] == "devices":
-                    app.session.encoders[:] = event[3]
-        except Exception:
-            pass
+        app._tick()
         if not app.busy:
             return
         time.sleep(0.1)
@@ -41,23 +46,17 @@ class WindowSmoke(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         os.environ["XDG_DATA_HOME"] = self.tmp
         self.mods = fake_tk.install()
-        self.patch = mock.patch.dict(sys.modules, self.mods)
-        self.patch.start()
+        self.patches = [mock.patch.dict(sys.modules, self.mods),
+                        mock.patch.object(project_module, "resolve", fake_resolve)]
+        for p in self.patches:
+            p.start()
         sys.modules.pop("jerncast.gui", None)
         self.gui = importlib.import_module("jerncast.gui")
-        # a project made of generated test sources, saved where the window will load it
-        p = Project()
-        p.add_scene("Red")
-        p.add_scene("Blue")
-        red = p.add_source("test_color", "Red screen", "red")
-        blue = p.add_source("test_color", "Blue screen", "blue")
-        p.add_item("Red", red.id)
-        p.add_item("Blue", blue.id)
-        p.add_source("test_audio", "Tone", "440")
-        p.save()
-        core.Settings(folder=self.tmp + "/videos", canvas="640x360").save()
+        core.Settings(folder=self.tmp + "/videos", canvas="640x360", webcam="Cam A", mic="Mic A").save()
         self.app = self.gui.App(self.mods["tkinter"].Tk())
-        time.sleep(1.5)                      # device scan finishes in the background
+        self.app.session.loopback_factory = lambda: loopback.Feeder(loopback.ToneSource()).start()
+        time.sleep(1.5)                       # the device scan finishes in the background
+        self.app._tick()
         self.shown = self.mods["tkinter.messagebox"].shown
 
     def tearDown(self):
@@ -66,138 +65,111 @@ class WindowSmoke(unittest.TestCase):
         finally:
             for hk in self.app.hotkeys:
                 hk.stop()
-            self.patch.stop()
+            for p in reversed(self.patches):
+                p.stop()
             sys.modules.pop("jerncast.gui", None)
             shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_docks_show_the_project(self):
+    def test_window_shows_the_settings(self):
         a = self.app
-        self.assertEqual(a.scene_list.items, ["Red", "Blue"])
-        self.assertEqual(a.source_list.items, ["●  Red screen"])
-        self.assertEqual(list(a.meter_canvases), ["s3"])
-        self.assertTrue(any(kind == "rect" for kind, _ in a.preview.drawn))
+        self.assertEqual(a.cb_layout["values"], ["Screen only", "Screen + webcam", "Webcam only",
+                                                 "Webcam + small screen"])
+        self.assertIn("1280×720", a.info.get() or a.base_info)
+        self.assertIn("required", a.key_hint.get())
+        self.assertEqual(sorted(a.project.sources), ["desktop", "mic", "screen", "webcam"])
+        self.assertEqual(len(a.hotkeys), 6)                      # record, live, Ctrl+Alt+1..4
+        self.assertEqual(a.recent_list.items, ["No recordings yet. Press Start Recording."])
 
-    def test_record_switch_scene_mute_hide_and_stop(self):
+    def test_record_change_layout_live_mute_and_stop(self):
         a = self.app
         a._toggle_record()
         wait_idle(a)
         self.assertTrue(a.session.recording, self.shown)
-        self.assertEqual(a.rec_btn["text"] if a.rec_btn["text"] else "", a.rec_btn["text"])
         a._update_buttons()
         self.assertEqual(a.rec_btn["text"], "Stop Recording")
         time.sleep(2)
-        a.scene_list.selection_set(1)                      # click "Blue"
-        a._on_scene_select()
-        self.assertEqual(a.project.current, "Blue")
-        self.assertEqual(a.source_list.items, ["●  Blue screen"])
-        a._on_mute("s3", True)
-        a.source_list.selection_set(0)
-        a._toggle_visible()                                # hide the blue screen live
-        self.assertEqual(a.source_list.items, ["○  Blue screen"])
+        a._set_layout(2)                                         # screen + webcam, live
+        self.assertEqual(a.session.project.current, layout_scene_name(2))
+        a._toggle_webcam()                                       # back to screen only
+        self.assertEqual(a.session.project.current, layout_scene_name(1))
+        a.v_mic_on.set(False)
+        a._audio_on("mic")                                       # mute the mic live
+        self.assertTrue(a.session.project.sources["mic"].muted)
         a._update_status()
-        self.assertIn("REC", a.status.get())
+        self.assertTrue(a.status.get().startswith("REC"))
+        a._volume("desktop", 50)
+        self.assertEqual(a.session.project.sources["desktop"].volume, 0.5)
         time.sleep(1.5)
         a._draw_meters(a.session.meters())
         a._toggle_record()
         wait_idle(a)
         self.assertFalse(a.session.recording)
-        self.assertTrue(a.session.last_recording is None or a.session.last_recording.exists())
-        self.assertIn("Saved", a.note)
+        self.assertEqual(len(a.recent_list.items), 1)
+        self.assertTrue(a.recent_list.items[0].startswith("JernCast "))
+        self.assertTrue(a.recent_list.items[0].endswith(".mp4"))
         self.assertFalse(any(k == "showerror" for k, _ in self.shown), self.shown)
+        self.assertEqual(json.loads((core.data_dir() / "settings.json").read_text())["recent"][0],
+                         a.settings.recent[0])
 
-    def test_editing_is_locked_while_recording_but_not_scene_switching(self):
+    def test_compact_mode_shows_the_live_picture(self):
         a = self.app
-        a._toggle_record()
+        a._toggle_compact()
         wait_idle(a)
-        before = len(a.project.scenes)
-        a._remove_scene()
-        self.assertEqual(len(a.project.scenes), before)
-        self.assertEqual(self.shown[-1][0], "showinfo")
-        a._toggle_record()
+        self.assertTrue(a.session.running and not a.session.recording)   # the preview keeps capturing
+        time.sleep(2)
+        a._draw_preview()
+        self.assertTrue(any(kind == "image" for kind, _ in a.preview.drawn))
+        a._toggle_compact()                                              # back to the full view
         wait_idle(a)
+        self.assertFalse(a.session.running)                              # preview stopped, nothing recording
 
-    def test_scene_add_rename_remove_when_idle(self):
+    def test_go_live_without_key_explains(self):
         a = self.app
-        simple = self.mods["tkinter.simpledialog"]
-        simple.answers[:] = ["Talking"]
-        a._add_scene()
-        self.assertEqual(a.project.current, "Talking")
-        simple.answers[:] = ["Chat"]
-        a._rename_scene()
-        self.assertEqual(a.scene_list.items, ["Red", "Blue", "Chat"])
-        a._remove_scene()
-        self.assertEqual(a.scene_list.items, ["Red", "Blue"])
-
-    def test_source_remove_and_move(self):
-        a = self.app
-        a.source_list.selection_set(0)
-        a._remove_source()
-        self.assertEqual(a.source_list.items, [])
-        self.assertNotIn("s1", a.project.sources)
-
-    def test_stream_without_key_explains(self):
-        a = self.app
-        a.settings.stream_key = ""
-        a._toggle_stream()
+        a._toggle_live()
         wait_idle(a)
-        self.assertEqual(self.shown[-1][0], "showerror")
-        self.assertIn("stream key", self.shown[-1][1][1])
+        kind, args = self.shown[-1]
+        self.assertEqual(kind, "showerror")
+        self.assertIn("stream key", args[1])
 
-    def test_manage_broadcast_opens_youtube(self):
+    def test_services_fill_the_server(self):
         a = self.app
+        a.v_service.set("Twitch")
+        a._service_changed()
+        self.assertEqual(a.v_server.get(), "rtmp://live.twitch.tv/app")
+        self.assertEqual(a.settings.stream_server, "rtmp://live.twitch.tv/app")
         with mock.patch.object(self.gui.webbrowser, "open") as opened:
             a._manage_broadcast()
-        self.assertIn("youtube.com", opened.call_args[0][0])
-        a.settings.stream_server = "rtmp://example.org/x"
-        a._manage_broadcast()
-        self.assertEqual(self.shown[-1][0], "showinfo")
+        self.assertIn("twitch", opened.call_args[0][0])
 
-    def test_dialogs_build_and_collect(self):
+    def test_duration_stops_the_recording(self):
         a = self.app
-        from jerncast.winutil import Monitor
-        a.monitors = [Monitor("Display 1 - 800x600 (main)", 0, 0, 800, 600)]
-        a.windows, a.webcams, a.audio_inputs = ["Notepad"], ["Cam A"], ["Mic A"]
-        for kind, expect in (("display", "Display 1 - 800x600 (main)"), ("window", "Notepad"),
-                             ("webcam", "Cam A"), ("audio", "Mic A")):
-            result = self.gui.SourceDialog(a, kind).collect()
-            self.assertEqual(result["device"], expect, kind)
-        image = self.gui.SourceDialog(a, "image")
-        self.assertIsNone(image.collect())                      # asks for a file first
-        image.v_device.set("logo.png")
-        self.assertEqual(image.collect()["device"], "logo.png")
+        a.v_duration.set("1")
+        a._toggle_record()
+        wait_idle(a)
+        self.assertTrue(a.session.recording)
+        time.sleep(1.5)
+        with mock.patch.object(type(a.session), "record_seconds", lambda self: 61.0):
+            a._collect()
+            a._check_duration()
+        wait_idle(a)
+        self.assertFalse(a.session.recording)
+        self.assertEqual(len(a.recent_list.items), 1)
 
-        dlg = self.gui.SettingsDialog(a)
-        dlg.v_fps.set("60")
-        dlg.v_key.set(" abc ")
-        self.assertTrue(dlg.collect())
-        self.assertEqual((a.settings.fps, a.settings.stream_key), (60, "abc"))
-        dlg.v_hk_stream.set(dlg.v_hk_rec.get())
-        self.assertIsNone(dlg.collect())                        # two identical hotkeys are refused
-
-    def test_adding_sources_through_the_dialog(self):
+    def test_webcam_layouts_need_a_webcam(self):
         a = self.app
-        answer = {"name": "Cam", "device": "Cam A", "layout": "corner", "corner": "top-left", "size": "small"}
-        with mock.patch.object(self.gui.SourceDialog, "show", return_value=answer):
-            a._add_source("webcam")
-            self.assertEqual(a.source_list.items[0], "●  Cam")
-            a._add_source("audio")
-        self.assertEqual(len(a.project.audio_sources()), 2)
-        self.assertEqual(len(a.meter_canvases), 2)
-        item = a.project.current_scene.items[-1]
-        self.assertEqual((item.layout, item.corner, item.size), ("corner", "top-left", "small"))
-        a.source_list.selection_set(0)
-        edit = dict(answer, name="Me", device="Cam B")
-        with mock.patch.object(self.gui.SourceDialog, "show", return_value=edit):
-            a._properties()
-        self.assertEqual(a.source_list.items[0], "●  Me")
-        a._move_source(-1)
-        self.assertEqual([i.source for i in a.project.current_scene.items], ["s4", "s1"])   # sent backwards
+        a.v_webcam.set("None")
+        a._choices_changed()
+        self.assertEqual(a.cb_layout["values"], ["Screen only"])
+        a._toggle_webcam()
+        self.assertIn("webcam", a.note)
 
-    def test_exit_saves_everything(self):
+    def test_stream_key_is_only_saved_when_allowed(self):
         a = self.app
-        a.settings.fps = 24
+        a.v_key.set("topsecret")
+        a.v_remember.set(False)
         a._exit()
-        self.assertEqual(core.Settings.load().fps, 24)
+        self.assertEqual(core.Settings.load().stream_key, "")
+        self.assertNotIn("topsecret", (core.data_dir() / "settings.json").read_text())
 
 
 if __name__ == "__main__":

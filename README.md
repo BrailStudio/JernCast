@@ -1,37 +1,49 @@
-<p align="center"><img src="assets/jerncast-logo.png" alt="JernCast" width="240"></p>
+<p align="center"><img src="assets/jerncast-logo.png" alt="JernCast" width="220"></p>
 
-# JernCast 0.0.1
+# JernCast 0.0.2
 
-A screen recorder and live streamer for Windows 10/11, laid out like OBS.
+A simple screen recorder and live streamer for Windows 10/11. Pick what to capture, press
+**Start Recording** or **Go live**.
 
-| Dock | What it does |
+## What is in the window
+
+| Card | What it does |
 | --- | --- |
-| **Scenes** | Make several scenes (for example "Game", "Just me", "Be right back") and click one to switch to it, even while you are live. Add, remove, rename. |
-| **Sources** | What is in the current scene: screen, a single window, webcam, picture. Show/hide each one, move it forward or back, make it fill the picture or sit small in a corner. |
-| **Audio Mixer** | Every microphone or Stereo Mix you add gets a volume slider, a Mute box and a live level meter. All work while recording or streaming. |
-| **Controls** | **Start Streaming**, **Start Recording**, **Manage Broadcast**, **Settings**, Open recordings folder, Exit. |
+| **Capture** | Screen, or a single window. 30 or 60 fps. Stop after N minutes. Output folder and file name. |
+| **Stream** | YouTube, Twitch or a custom server, and your stream key. Tells you if the key is missing. |
+| **Recent recordings** | Your last recordings. Double-click to open. |
+| **Audio & Webcam** | Microphone and desktop sound, each with a level slider, an On switch and a live level meter. Webcam, its corner and its size. A **Layout** switch. |
+| **Advanced** | Encoder (your graphics card is used when it works), output size 480p / 720p / 1080p, quality, top bitrate, hotkeys, show cursor, MP4, whether to remember the stream key. |
 
-- Streaming and recording are separate buttons. Start either one first, stop either one without stopping the other.
-- If your internet drops, the stream ends and a message tells you, but the recording on your PC keeps going.
-- Hotkeys (change them in Settings): **F9** start/stop recording, **F10** start/stop streaming.
-- Records to MKV (safe if the PC crashes) and converts to MP4 when you stop.
-- Uses your graphics card's encoder when it works (NVIDIA, Intel, AMD), otherwise the CPU.
-- Light enough for a PC with 4 GB of RAM (use a smaller picture size and `low` quality in Settings).
+Bottom: **Start Recording**, **Go live**, **Manage Broadcast** (opens YouTube's or Twitch's live control page).
+**Compact** (top right) turns the window into a small live preview with level meters and layout buttons.
 
-JernCast is a window around [FFmpeg](https://ffmpeg.org), which does the actual capturing and encoding.
+### Four layouts, switched live
+
+1. Screen only 2. Screen + webcam in a corner 3. Webcam only 4. Webcam full with the screen small
+
+Change them from the Layout box, the **1 2 3 4** buttons in Compact view, or with **Ctrl+Alt+1 to 4**.
+This works while you are recording or live. (They need a webcam chosen; without one there is just layout 1.)
+
+Hotkeys: **F9** start/stop recording, **F10** go live / stop (changeable under Advanced).
+
+Streaming and recording are separate: start either first, stop either without stopping the other. If the
+internet drops, the stream ends and you are told, but the recording keeps going.
+Recordings are saved as MKV while recording (safe if the PC crashes) and become MP4 when you stop.
 
 ## Get it
 
 ### Easiest: build the installer on GitHub (nothing to install on your PC)
 
-1. Make a GitHub repository (private is fine) and upload everything in this folder.
+1. Make a **public** GitHub repository and upload everything in this folder.
 2. Open the **Actions** tab, choose **JernCast Windows installer**, press **Run workflow**.
-3. After about 10 minutes, open the run and download **Jerncast-0.0.1-Setup**. Unzip it and run the setup.
+3. After about 5 to 10 minutes open the run and download **Jerncast-0.0.2-Setup** (bottom of the page, Artifacts).
 
-### Or run it right now without building
+### Or run it without building
 
 1. Install Python 3.10 or newer from https://www.python.org/downloads/ and tick **Add python.exe to PATH**.
-2. Double-click **run.bat**. The first time, it downloads FFmpeg (about 150 MB).
+2. Double-click **run.bat**. The first time it downloads FFmpeg (about 150 MB). For desktop sound also run
+   `pip install pyaudiowpatch` once.
 
 ### Or build the installer on your own PC
 
@@ -41,53 +53,41 @@ scripts\build-windows.ps1 -Installer     # needs Python, and Inno Setup 6 for th
 
 ## Going live on YouTube
 
-1. In YouTube Studio press **Create > Go live > Stream** and copy the **Stream key**.
-2. In JernCast open **Settings > Stream**, keep the YouTube server, paste the key, **Save**.
-   In **Settings > Output** start with a bitrate of **4500** and picture size **1280x720**
-   (use **854x480** and **2500** on a slow PC or connection).
-3. Press **Start Streaming**. JernCast checks the connection and shows an error if YouTube can't be reached.
-4. Press **Manage Broadcast** to open YouTube's live control page. When the preview looks good there,
-   press its own **Go live** button. Press **Stop Streaming** here to end.
+1. YouTube Studio > **Create > Go live > Stream**, copy the **Stream key**.
+2. In JernCast, **Stream** card: service **YouTube**, paste the key. Under **Advanced** use output **720p**
+   and bitrate **4500** (use **480p** and **2500** on a slow connection).
+3. Press **Go live**. JernCast tells you if YouTube cannot be reached.
+4. Press **Manage Broadcast** to open YouTube's control page and press its own **Go live** when the preview looks good.
 
-The stream key is saved only on your PC, in `%LOCALAPPDATA%\JernCast\settings.json`, and JernCast hides it
-in logs and messages. Treat it like a password. Your upload speed must be higher than the bitrate.
-Twitch works too (server `rtmp://live.twitch.tv/app`).
+Your stream key is saved on your PC only (untick *Remember stream key* under Advanced to not save it) and is
+hidden in logs and messages. Your upload speed must be higher than the bitrate.
 
-## First steps
+## Notes and limits (version 0.0.2)
 
-1. Open JernCast. There is one scene with a **Display capture**.
-2. **+ Audio input** in the mixer: add your microphone (and **Stereo Mix** if your sound card has it,
-   which is how you record what the PC plays).
-3. **+ Add > Webcam** in Sources, choose **Small, in a corner**. Make a second scene without it.
-4. Press **Start Recording** (or F9). Click between scenes. Press it again to stop; the MP4 is in `Videos\JernCast`.
-
-## Notes and limits (version 0.0.1)
-
-- **No live picture preview yet.** The big area shows a layout view of the current scene (boxes), not the
-  real picture. A real preview is planned.
-- **Add, remove and move sources and scenes while stopped.** While recording or streaming you can switch
-  scenes, show/hide sources, change volume and mute, but not add or remove. Stop first.
-- **Every source in every scene is captured at the same time** (so switching is instant). Keep the number
-  of sources small on a slow PC.
-- **PC sound** needs "Stereo Mix" (Sound settings > Recording devices > right-click > Show disabled devices)
-  or a virtual audio cable. Windows does not allow FFmpeg to record "what you hear" directly.
-- Window capture records the window's size at the moment you start. Some protected windows (video apps with
-  DRM) record as black. If a webcam will not start, close other apps using it (Teams, Zoom, browser).
-- The "separate file per source" mode from the first preview was replaced by scenes.
-- Logs and settings are in `%LOCALAPPDATA%\JernCast`. If something fails, the newest file in `logs` shows FFmpeg's message.
+- **Desktop sound** ("System sound") is captured with Windows' loopback, using the `pyaudiowpatch` package that the
+  installer includes. If it is missing, JernCast says so; then pick **Stereo Mix** (Sound settings > Recording
+  devices > Show disabled devices) or a virtual audio cable instead. This part has not been run on a real Windows PC yet.
+- **Live preview** is in Compact view. It keeps the screen being captured while you look at it, which uses CPU;
+  on a slow PC switch back to the full view when you do not need it.
+- Source, size, quality and device changes apply when you next press Start. Layout, mic/desktop level and On switches
+  work live.
+- Every source in every layout is captured while running (that is what makes switching instant).
+- No replay buffer, green screen or crop yet.
+- Window capture records the window's size at the moment you start; protected video windows record black.
+  If a webcam will not start, close other apps using it.
+- Logs and settings: `%LOCALAPPDATA%\JernCast` (Advanced > Open logs folder).
 
 ## For developers
 
-`python -m unittest discover -s tests` runs 42 tests with real FFmpeg and generated test sources (they work on
-any OS; the window's tests use a stand-in for tkinter). The code is in `jerncast/`:
+`python -m unittest discover -s tests` runs the tests with real FFmpeg and generated test sources (any OS; the
+window's tests use a stand-in for tkinter, so they check what the buttons do, not how the window looks).
 
-- `core.py` settings, devices, encoders · `project.py` scenes, sources and the FFmpeg graph
-- `engine.py` the running FFmpeg and its outputs · `session.py` what the buttons call
+- `core.py` settings, devices, encoders · `layouts.py` window choices to scenes · `project.py` scenes and the FFmpeg graph
+- `engine.py` the running FFmpeg and its outputs · `session.py` what the buttons call · `loopback.py` system sound
 - `gui.py` the window · `winutil.py` monitors, windows, hotkeys
 
-How it works: one FFmpeg process captures every source, draws every scene, mixes the audio and encodes once.
-Scene switches, hiding, volume and mute are commands sent to that running FFmpeg. Its output is relayed to two
-small `ffmpeg -c copy` processes, one saving the file and one sending the stream, which is why each can start
-and stop on its own.
+One FFmpeg captures every source, draws every layout, mixes the audio and encodes once. Layout changes, levels and
+mute are commands sent to that running FFmpeg. Its output is relayed to small `ffmpeg -c copy` processes, one saving
+the file and one sending the stream, so each can start and stop alone.
 
-MIT licensed, see `LICENSE`. FFmpeg notice in `THIRD_PARTY.md`.
+MIT licensed, see `LICENSE`. Third-party notices in `THIRD_PARTY.md`.

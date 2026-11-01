@@ -48,7 +48,9 @@ def assets_dir() -> Path:
 
 @dataclasses.dataclass
 class Settings:
+    # output
     folder: str = dataclasses.field(default_factory=default_output_folder)
+    prefix: str = "JernCast"        # start of recording file names
     canvas: str = "1280x720"        # the size of the picture that is recorded / streamed
     fps: int = 30
     quality: str = "medium"         # high | medium | low
@@ -56,10 +58,33 @@ class Settings:
     encoder: str = "auto"
     mp4: bool = True                # convert to MP4 when finished
     keep_mkv: bool = False
-    hotkey_record: str = "F9"
-    hotkey_stream: str = "F10"
+    duration_min: int = 0           # stop recording by itself after this many minutes (0 = never)
+    show_cursor: bool = True
+    # capture
+    screen: str = ""                # monitor label ("" = the first one)
+    window: str = ""                # "" = the whole screen, otherwise a window title
+    # audio
+    mic: str = ""
+    mic_on: bool = True
+    mic_volume: int = 100           # percent, 0-200
+    desktop: str = "loopback"       # "loopback" = system sound, "" = off, otherwise a device name
+    desktop_on: bool = True
+    desktop_volume: int = 100
+    # webcam and layout
+    webcam: str = ""
+    layout: int = 1                 # 1 screen, 2 screen + webcam, 3 webcam, 4 webcam + small screen
+    cam_corner: str = "bottom-right"
+    cam_size: int = 25              # percent of the picture width
+    # stream
+    stream_service: str = "YouTube"
     stream_server: str = "rtmp://a.rtmp.youtube.com/live2"
     stream_key: str = ""
+    remember_key: bool = True
+    # app
+    hotkey_record: str = "F9"
+    hotkey_stream: str = "F10"
+    compact: bool = False
+    recent: list = dataclasses.field(default_factory=list)
 
     @property
     def canvas_size(self) -> tuple[int, int]:
@@ -81,8 +106,10 @@ class Settings:
 
     def save(self) -> None:
         try:
-            (data_dir() / "settings.json").write_text(
-                json.dumps(dataclasses.asdict(self), indent=2), encoding="utf-8")
+            data = dataclasses.asdict(self)
+            if not self.remember_key:
+                data["stream_key"] = ""
+            (data_dir() / "settings.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
         except OSError:
             log.exception("could not save settings")
 
@@ -240,6 +267,14 @@ def safe_name(text: str) -> str:
 def format_time(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+SERVICES = {
+    "YouTube": "rtmp://a.rtmp.youtube.com/live2",
+    "Twitch": "rtmp://live.twitch.tv/app",
+    "Custom": "",
+}
+OUTPUT_SIZES = {"480p": "854x480", "720p": "1280x720", "1080p": "1920x1080"}
 
 
 def manage_broadcast_url(server: str) -> str:

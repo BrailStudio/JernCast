@@ -11,7 +11,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .core import (Settings, data_dir, redact, run)
+from .core import Settings, data_dir, redact, run, safe_name
+from . import loopback as loopback_module
 from .engine import Consumer, Engine, EngineError
 from .project import (Project, build_plan, item_enabled, item_filter_name, volume_filter_name,
                       effective_volume)
@@ -40,6 +41,8 @@ class Session:
         self.stream: Consumer | None = None
         self.record_path: Path | None = None
         self.last_recording: Path | None = None
+        self.preview_wanted = False
+        self.loopback_factory = loopback_module.start_system_sound     # tests replace this
         self._sent: dict[tuple[int, int], bool] = {}
         self._ops = threading.RLock()       # long actions: start/stop recording and streaming
         self._state = threading.RLock()     # quick live changes: scene, volume, mute
@@ -81,14 +84,27 @@ class Session:
             return False
         if self.engine is not None:
             self._drop_dead_engine()
+        feeder = None
+        if any(src.kind == "loopback" for src in self.project.audio_sources()):
+            try:
+                feeder = self.loopback_factory()
+            except loopback_module.LoopbackError as exc:
+                raise SessionError(str(exc)) from exc
         try:
-            plan = build_plan(self.ffmpeg, self.project, self.settings, self._encoder(), self.monitors)
+            plan = build_plan(self.ffmpeg, self.project, self.settings, self._encoder(), self.monitors,
+                              loopback=feeder.params if feeder else None)
         except ValueError as exc:
+            if feeder:
+                feeder.stop()
             raise SessionError(str(exc)) from exc
         engine = Engine(self.ffmpeg, plan, data_dir(), self._logs() / f"{_stamp()} engine.log")
+        if feeder:
+            engine.cleanups.append(feeder.stop)
         try:
             engine.start()
         except EngineError as exc:
+            if feeder:
+                feeder.stop()
             raise SessionError("Could not start capturing:\n\n" + str(exc)) from exc
         with self._state:
             self.engine = engine
@@ -108,9 +124,23 @@ class Session:
                 log.exception("closing a dead engine failed")
 
     def _stop_engine_if_idle(self) -> None:
-        if self.engine is not None and not self.record and not self.stream:
+        if self.engine is not None and not self.record and not self.stream and not self.preview_wanted:
             engine, self.engine = self.engine, None
             engine.stop()
+
+    # -- preview -------------------------------------------------------------
+    def set_preview(self, wanted: bool) -> None:
+        """Show the live picture even when not recording (this keeps capturing, which uses CPU)."""
+        with self._ops:
+            self.preview_wanted = wanted
+            if wanted:
+                self._ensure_engine()
+            else:
+                self._stop_engine_if_idle()
+
+    def preview_path(self) -> Path | None:
+        engine = self.engine
+        return engine.preview_path if engine is not None and engine.alive else None
 
     # -- recording -----------------------------------------------------------
     def start_recording(self) -> Path:
@@ -125,7 +155,7 @@ class Session:
             except OSError as exc:
                 self._rollback(started)
                 raise SessionError(f"Cannot use the folder {folder}: {exc}") from exc
-            out = folder / f"JernCast {_stamp()}{ext}"
+            out = folder / f"{safe_name(self.settings.prefix or 'JernCast')} {_stamp()}{ext}"
             cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
                    "-probesize", "500000", "-analyzeduration", "1000000",
                    "-f", "mpegts", "-i", "pipe:0", "-map", "0:v?", "-map", "0:a?",
@@ -185,7 +215,7 @@ class Session:
                 return
             server, key = self.settings.stream_server.strip(), self.settings.stream_key.strip()
             if not server or not key:
-                raise SessionError("Open Settings > Stream and enter the server and your stream key.")
+                raise SessionError("Enter the stream server and your stream key in the Stream card first.")
             if not self.project.has_video():
                 raise SessionError("Live streaming needs a picture: add a display, window or webcam source.")
             started = self._ensure_engine()

@@ -4,7 +4,7 @@ import unittest
 
 from jerncast import core
 from jerncast.core import Settings
-from jerncast.project import Project, build_plan, layout_rects
+from jerncast.project import Project, SourceDef, build_plan, layout_rects
 from jerncast.winutil import Monitor
 
 MON = [Monitor("Display 1 - 1920x1080 (main)", 0, 0, 1920, 1080)]
@@ -84,7 +84,9 @@ class PlanTests(unittest.TestCase):
         self.assertIn("volume@vol_s4=volume=1.000", text)
         self.assertIn("direct=1", text)
         self.assertEqual(sorted(plan.meter_files), ["s3", "s4"])
-        self.assertEqual(plan.cmd[-1], "pipe:1")
+        self.assertIn("pipe:1", plan.cmd)
+        self.assertEqual((plan.cmd[-1], plan.preview_file), ("preview.png", "preview.png"))
+        self.assertIn("split=2[v][pv0]", text)
 
     def test_muted_source_starts_silent_and_hidden_item_starts_off(self):
         p = sample()
@@ -100,6 +102,24 @@ class PlanTests(unittest.TestCase):
         text = " ".join(self.plan(p).cmd)
         self.assertIn("overlay@ov0_0=x=(W-w)/2:y=(H-h)/2:enable=0", text)
         self.assertIn("overlay@ov1_0=x=(W-w)/2:y=(H-h)/2:enable=1", text)
+
+    def test_no_preview_option_and_cursor_and_loopback(self):
+        p = Project.default()
+        p.sources["sys"] = SourceDef("sys", "loopback", "System sound")
+        text = " ".join(build_plan("ffmpeg", p, Settings(show_cursor=False), "libx264", MON,
+                                   loopback=(5555, 48000, 2), preview=False).cmd)
+        self.assertNotIn("preview.png", text)
+        self.assertIn("-draw_mouse 0", text)
+        self.assertIn("-f s16le -ar 48000 -ac 2", text)
+        self.assertIn("tcp://127.0.0.1:5555", text)
+        with self.assertRaises(ValueError):                      # no feeder, no system sound
+            build_plan("ffmpeg", p, Settings(), "libx264", MON)
+
+    def test_corner_size_can_be_a_percent(self):
+        from jerncast.project import corner_fraction
+        self.assertEqual(corner_fraction("30"), 0.3)
+        self.assertEqual(corner_fraction("large"), 0.33)
+        self.assertEqual(corner_fraction("nonsense"), 0.25)
 
     def test_audio_only_and_empty(self):
         p = Project()

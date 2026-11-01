@@ -20,13 +20,22 @@ from .core import (Settings, data_dir, encoder_args, pix_fmt_for)
 log = logging.getLogger("jerncast")
 
 VIDEO_KINDS = ("display", "window", "webcam", "image", "test_color")
-AUDIO_KINDS = ("audio", "test_audio")
+AUDIO_KINDS = ("audio", "loopback", "test_audio")
 KIND_LABELS = {
     "display": "Display capture", "window": "Window capture", "webcam": "Webcam",
-    "image": "Image", "audio": "Audio input",
+    "image": "Image", "audio": "Audio input", "loopback": "System sound",
     "test_color": "Test colour", "test_audio": "Test tone",
 }
 CORNER_FRACTION = {"small": 0.18, "medium": 0.25, "large": 0.33}
+
+def corner_fraction(size) -> float:
+    """Width of a corner source as a fraction of the picture: a name or a percent like "25"."""
+    text = str(size)
+    if text.isdigit():
+        return max(0.05, min(0.9, int(text) / 100))
+    return CORNER_FRACTION.get(text, 0.25)
+
+
 CORNER_POS = {
     "bottom-right": "W-w-24:H-h-24",
     "bottom-left": "24:H-h-24",
@@ -236,17 +245,23 @@ class Capture:
     y: int = 0
     w: int = 0
     h: int = 0
+    cursor: bool = True
 
 
 def input_args(cap: Capture, fps: int) -> list[str]:
+    mouse = "1" if cap.cursor else "0"
+    if cap.kind == "loopback":              # system sound, fed in by JernCast over a local socket
+        port, rate, channels = cap.name.split(":")
+        return ["-f", "s16le", "-ar", rate, "-ac", channels, "-thread_queue_size", "1024",
+                "-i", f"tcp://127.0.0.1:{port}"]
     if cap.kind == "screen":
-        args = ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1"]
+        args = ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", mouse]
         if cap.w and cap.h:
             args += ["-offset_x", str(cap.x), "-offset_y", str(cap.y),
                      "-video_size", f"{cap.w}x{cap.h}"]
         return args + ["-i", "desktop"]
     if cap.kind == "window":
-        return ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1",
+        return ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", mouse,
                 "-i", f"title={cap.name}"]
     if cap.kind == "webcam":
         return ["-f", "dshow", "-rtbufsize", "256M", "-use_wallclock_as_timestamps", "1",
@@ -263,16 +278,21 @@ def input_args(cap: Capture, fps: int) -> list[str]:
     raise ValueError(f"unknown source kind {cap.kind!r}")
 
 
-def resolve(src: SourceDef, monitors: list) -> Capture:
+def resolve(src: SourceDef, monitors: list, cursor: bool = True,
+            loopback: tuple | None = None) -> Capture:
     """Turn a saved source into a capture (look up the monitor by its label)."""
     if src.kind == "display":
         mon = next((m for m in monitors if m.name == src.device), None) or (monitors[0] if monitors else None)
         if mon is None:
-            return Capture("screen")
-        return Capture("screen", mon.name, mon.x, mon.y, mon.w, mon.h)
+            return Capture("screen", cursor=cursor)
+        return Capture("screen", mon.name, mon.x, mon.y, mon.w, mon.h, cursor)
+    if src.kind == "loopback":
+        if loopback is None:
+            raise ValueError("System sound capture is not available on this PC.")
+        return Capture("loopback", ":".join(str(v) for v in loopback))
     kind = {"window": "window", "webcam": "webcam", "image": "image", "audio": "audio",
             "test_color": "test_color", "test_audio": "test_audio"}[src.kind]
-    return Capture(kind, src.device)
+    return Capture(kind, src.device, cursor=cursor)
 
 
 # --------------------------------------------------------------------------
@@ -301,10 +321,11 @@ class Plan:
     has_video: bool
     has_audio: bool
     meter_files: dict[str, str]          # audio source id -> file name (inside the meters folder)
+    preview_file: str = ""               # small picture of the output, refreshed a few times a second
 
 
 def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
-               monitors: list) -> Plan:
+               monitors: list, loopback: tuple | None = None, preview: bool = True) -> Plan:
     fps = settings.fps
     cw, ch = settings.canvas_size
     pix = pix_fmt_for(encoder)
@@ -325,7 +346,7 @@ def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
     has_video = bool(video_ids)
     if has_video:
         base_idx = add(["-re", "-f", "lavfi", "-i", f"color=c=black:s={cw}x{ch}:r={fps}"])
-        src_index = {sid: add(input_args(resolve(project.sources[sid], monitors), fps))
+        src_index = {sid: add(input_args(resolve(project.sources[sid], monitors, settings.show_cursor), fps))
                      for sid in video_ids}
         uses: dict[str, list[tuple[int, int]]] = {sid: [] for sid in video_ids}
         for si, scene in enumerate(project.scenes):
@@ -349,7 +370,7 @@ def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
                 if (si, ii) not in branch:
                     continue
                 if item.layout == "corner":
-                    width = int(cw * CORNER_FRACTION.get(item.size, 0.25)) // 2 * 2
+                    width = int(cw * corner_fraction(item.size)) // 2 * 2
                     scale = f"scale={width}:-2,setsar=1"
                     pos = CORNER_POS.get(item.corner, CORNER_POS["bottom-right"])
                     x, y = pos.split(":")
@@ -362,7 +383,11 @@ def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
                 graph.append(f"[{last}][i{si}_{ii}]{item_filter_name(si, ii)}="
                              f"x={x}:y={y}:enable={enable}:eof_action=repeat[{out}]")
                 last = out
-        graph.append(f"[{last}]format={pix}[v]")
+        if preview:
+            graph.append(f"[{last}]format={pix},split=2[v][pv0]")
+            graph.append("[pv0]fps=3,scale=480:-2:flags=fast_bilinear,format=rgb24[pv]")
+        else:
+            graph.append(f"[{last}]format={pix}[v]")
         maps += ["-map", "[v]"]
 
     # ---- sound
@@ -370,7 +395,7 @@ def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
     meter_files: dict[str, str] = {}
     mix_labels: list[str] = []
     for src in audios:
-        idx = add(input_args(resolve(src, monitors), fps))
+        idx = add(input_args(resolve(src, monitors, loopback=loopback), fps))
         meter = f"meter_{src.id}.txt"
         meter_files[src.id] = meter
         graph.append(
@@ -399,7 +424,12 @@ def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
     if has_audio:
         cmd += ["-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
     cmd += ["-f", "mpegts", "-muxdelay", "0", "-flush_packets", "1", "pipe:1"]
-    return Plan(cmd, has_video, has_audio, meter_files)
+    preview_file = ""
+    if has_video and preview:
+        preview_file = "preview.png"
+        cmd += ["-map", "[pv]", "-c:v", "png", "-f", "image2", "-update", "1",
+                "-atomic_writing", "1", preview_file]
+    return Plan(cmd, has_video, has_audio, meter_files, preview_file)
 
 
 # --------------------------------------------------------------------------
@@ -414,7 +444,7 @@ def layout_rects(project: Project, scene: Scene, width: int, height: int) -> lis
         if src is None or not item.visible:
             continue
         if item.layout == "corner":
-            w = int(width * CORNER_FRACTION.get(item.size, 0.25))
+            w = int(width * corner_fraction(item.size))
             h = int(w * 9 / 16)
             m = int(width * 0.02)
             x0 = m if "left" in item.corner else width - w - m

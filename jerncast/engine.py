@@ -122,6 +122,7 @@ class Engine:
         self.meters_dir = work_dir / "meters"
         self.startup_wait = startup_wait
         self.consumers: dict[str, Consumer] = {}
+        self.cleanups: list = []           # things to stop with the engine (e.g. the system-sound feeder)
         self.started_at: float | None = None
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
@@ -208,6 +209,11 @@ class Engine:
             consumer.close()
         if self._logfile is not None:
             self._logfile.close()
+        for cleanup in self.cleanups:
+            try:
+                cleanup()
+            except Exception:
+                log.exception("engine cleanup failed")
         shutil.rmtree(self.meters_dir, ignore_errors=True)
 
     # -- consumers ----------------------------------------------------------
@@ -218,6 +224,10 @@ class Engine:
     def remove_consumer(self, name: str) -> Consumer | None:
         with self._lock:
             return self.consumers.pop(name, None)
+
+    @property
+    def preview_path(self) -> Path | None:
+        return self.meters_dir / self.plan.preview_file if self.plan.preview_file else None
 
     # -- live control -------------------------------------------------------
     def send(self, target: str, command: str, arg: str) -> bool:

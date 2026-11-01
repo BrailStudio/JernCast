@@ -20,8 +20,24 @@ class Monitor:
     h: int
 
 
-HOTKEYS = {"F6": 0x75, "F7": 0x76, "F8": 0x77, "F9": 0x78,
-           "F10": 0x79, "F11": 0x7A, "F12": 0x7B}
+HOTKEYS = ["F6", "F7", "F8", "F9", "F10", "F11", "F12"]
+_MODS = {"alt": 0x1, "ctrl": 0x2, "control": 0x2, "shift": 0x4, "win": 0x8}
+
+
+def parse_hotkey(spec: str):
+    """"Ctrl+Alt+1" -> (modifier flags, virtual-key code), or None if not understood."""
+    mods, key = 0, None
+    for part in [p.strip() for p in spec.split("+") if p.strip()]:
+        low = part.lower()
+        if low in _MODS:
+            mods |= _MODS[low]
+        elif len(part) == 1 and part.isalnum():
+            key = ord(part.upper())
+        elif low.startswith("f") and low[1:].isdigit() and 1 <= int(low[1:]) <= 12:
+            key = 0x70 + int(low[1:]) - 1
+        else:
+            return None
+    return None if key is None else (mods, key)
 
 
 def set_dpi_aware() -> None:
@@ -102,11 +118,13 @@ class Hotkey(threading.Thread):
         self._ready = threading.Event()
 
     def run(self) -> None:
-        if not IS_WINDOWS or self.key not in HOTKEYS:
+        parsed = parse_hotkey(self.key)
+        if not IS_WINDOWS or parsed is None:
             self._ready.set()
             return
         user32 = ctypes.windll.user32
-        self.ok = bool(user32.RegisterHotKey(None, 1, 0x4000, HOTKEYS[self.key]))  # no auto-repeat
+        mods, vk = parsed
+        self.ok = bool(user32.RegisterHotKey(None, 1, mods | 0x4000, vk))  # 0x4000: no auto-repeat
         self._ready.set()
         if not self.ok:
             log.warning("hotkey %s is already used by another program", self.key)
