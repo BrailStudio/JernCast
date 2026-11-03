@@ -213,8 +213,10 @@ def encoder_args(encoder: str, quality: str, kbps: int, fps: int) -> list[str]:
     if encoder == "h264_amf":
         return ["-c:v", "h264_amf", "-quality", "speed", "-rc", "vbr_peak",
                 "-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-g", gop]
+    # Low-memory x264: no look-ahead, no B-frames, one reference frame, two threads.
     return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), *cap,
-            "-g", gop, "-sc_threshold", "0"]
+            "-g", gop, "-sc_threshold", "0", "-threads", "2", "-rc-lookahead", "0",
+            "-bf", "0", "-refs", "1"]
 
 
 def probe_encoder(ffmpeg: str, encoder: str) -> bool:
@@ -275,6 +277,44 @@ SERVICES = {
     "Custom": "",
 }
 OUTPUT_SIZES = {"480p": "854x480", "720p": "1280x720", "1080p": "1920x1080"}
+
+
+def cached_working_encoders(ffmpeg: str) -> list[str]:
+    """working_encoders(), remembered between runs so the test encodes only happen once."""
+    path = data_dir() / "encoders.json"
+    try:
+        st = os.stat(ffmpeg)
+        key = f"{ffmpeg}|{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        return working_encoders(ffmpeg)
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved.get("key") == key and saved.get("encoders"):
+            return list(saved["encoders"])
+    except Exception:
+        pass
+    found = working_encoders(ffmpeg)
+    try:
+        path.write_text(json.dumps({"key": key, "encoders": found}), encoding="utf-8")
+    except OSError:
+        pass
+    return found
+
+
+_NOT_A_MIC = ("virtual", "voice changer", "stereo mix", "cable", "vb-audio", "loopback", "what u hear",
+              "mix", "obs", "nvidia broadcast", "steam streaming")
+
+
+def pick_microphone(devices: list[str]) -> str:
+    """The device most likely to be a real microphone (not a virtual cable or Stereo Mix)."""
+    real = [d for d in devices if not any(word in d.lower() for word in _NOT_A_MIC)]
+    for pool in (real, devices):
+        for d in pool:
+            if "microphone" in d.lower() or d.lower().startswith("mic"):
+                return d
+        if pool:
+            return pool[0]
+    return ""
 
 
 def manage_broadcast_url(server: str) -> str:

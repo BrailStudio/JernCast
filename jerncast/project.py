@@ -252,8 +252,7 @@ def input_args(cap: Capture, fps: int) -> list[str]:
     mouse = "1" if cap.cursor else "0"
     if cap.kind == "loopback":              # system sound, fed in by JernCast over a local socket
         port, rate, channels = cap.name.split(":")
-        return ["-f", "s16le", "-ar", rate, "-ac", channels, "-thread_queue_size", "1024",
-                "-i", f"tcp://127.0.0.1:{port}"]
+        return ["-f", "s16le", "-ar", rate, "-ac", channels, "-i", f"tcp://127.0.0.1:{port}"]
     if cap.kind == "screen":
         args = ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", mouse]
         if cap.w and cap.h:
@@ -269,10 +268,11 @@ def input_args(cap: Capture, fps: int) -> list[str]:
     if cap.kind == "image":
         return ["-loop", "1", "-framerate", str(fps), "-i", cap.name]
     if cap.kind == "audio":
-        return ["-f", "dshow", "-thread_queue_size", "1024",
-                "-use_wallclock_as_timestamps", "1", "-i", f"audio={cap.name}"]
+        # (no -thread_queue_size here: newer FFmpeg builds refuse it on this kind of input)
+        return ["-f", "dshow", "-use_wallclock_as_timestamps", "1", "-i", f"audio={cap.name}"]
     if cap.kind == "test_color":                       # used by the tests
-        return ["-re", "-f", "lavfi", "-i", f"color=c={cap.name or 'red'}:s=640x360:r={fps}"]
+        colour, _, size = (cap.name or "red").partition("@")          # "red" or "red@1920x1080"
+        return ["-re", "-f", "lavfi", "-i", f"color=c={colour}:s={size or '640x360'}:r={fps}"]
     if cap.kind == "test_audio":
         return ["-re", "-f", "lavfi", "-i", f"sine=frequency={cap.name or 440}:sample_rate=48000"]
     raise ValueError(f"unknown source kind {cap.kind!r}")
@@ -355,12 +355,17 @@ def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
         branch: dict[tuple[int, int], str] = {}
         for sid in video_ids:
             places = uses[sid]
+            # Shrink to the picture size and use compact YUV frames right away, so a 1080p screen
+            # capture is not carried around (and copied per layout) at full size: big memory saving.
+            fmt = "yuva420p" if project.sources[sid].kind == "image" else "yuv420p"
+            first = (f"[{src_index[sid]}:v]fps={fps},scale={cw}:{ch}:force_original_aspect_ratio=decrease:"
+                     f"flags=fast_bilinear,format={fmt}")
             if len(places) == 1:
-                graph.append(f"[{src_index[sid]}:v]fps={fps}[v_{sid}_0]")
+                graph.append(f"{first}[v_{sid}_0]")
                 branch[places[0]] = f"v_{sid}_0"
             else:
                 outs = "".join(f"[v_{sid}_{k}]" for k in range(len(places)))
-                graph.append(f"[{src_index[sid]}:v]fps={fps},split={len(places)}{outs}")
+                graph.append(f"{first},split={len(places)}{outs}")
                 for k, place in enumerate(places):
                     branch[place] = f"v_{sid}_{k}"
 

@@ -27,7 +27,8 @@ python -m pip install pyaudiowpatch
 if ($LASTEXITCODE) { Write-Warning 'pyaudiowpatch could not be installed: no system sound capture in this build.' }
 
 python -m PyInstaller --noconfirm --clean --windowed --name JernCast `
-    --icon assets\jerncast.ico --add-data "assets;assets" --hidden-import pyaudiowpatch jerncast_app.py
+    --icon assets\jerncast.ico --add-data "assets;assets" --hidden-import pyaudiowpatch `
+    --exclude-module unittest --exclude-module pydoc --exclude-module doctest jerncast_app.py
 if ($LASTEXITCODE) { throw 'PyInstaller failed' }
 
 Copy-Item tools\ffmpeg.exe dist\JernCast\ffmpeg.exe -Force

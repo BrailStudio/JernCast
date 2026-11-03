@@ -51,6 +51,14 @@ class CoreTests(unittest.TestCase):
             self.assertIn("3000k", text)
             self.assertIn("-g 30", text)
 
+    def test_pick_microphone_skips_virtual_devices(self):
+        devices = ["Microphone (Voice Changer Virtual Audio Device (WDM))", "Stereo Mix (Realtek(R) Audio)",
+                   "Microphone (Realtek(R) Audio)", "CABLE Output (VB-Audio Virtual Cable)"]
+        self.assertEqual(core.pick_microphone(devices), "Microphone (Realtek(R) Audio)")
+        self.assertEqual(core.pick_microphone(["Line In (USB)", "Stereo Mix"]), "Line In (USB)")
+        self.assertEqual(core.pick_microphone(["Stereo Mix (Realtek)"]), "Stereo Mix (Realtek)")
+        self.assertEqual(core.pick_microphone([]), "")
+
     def test_manage_broadcast_url(self):
         self.assertIn("youtube.com", core.manage_broadcast_url("rtmp://a.rtmp.youtube.com/live2"))
         self.assertIn("twitch", core.manage_broadcast_url("rtmp://live.twitch.tv/app"))

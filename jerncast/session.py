@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .core import Settings, data_dir, redact, run, safe_name
 from . import loopback as loopback_module
-from .engine import Consumer, Engine, EngineError
+from .engine import Consumer, Engine, EngineError, FileConsumer
 from .project import (Project, build_plan, item_enabled, item_filter_name, volume_filter_name,
                       effective_volume)
 
@@ -42,6 +42,7 @@ class Session:
         self.record_path: Path | None = None
         self.last_recording: Path | None = None
         self.preview_wanted = False
+        self._record_has_video = True
         self.loopback_factory = loopback_module.start_system_sound     # tests replace this
         self._sent: dict[tuple[int, int], bool] = {}
         self._ops = threading.RLock()       # long actions: start/stop recording and streaming
@@ -148,29 +149,21 @@ class Session:
             if self.record:
                 return self.record_path
             started = self._ensure_engine()
-            ext = ".mkv" if self.engine.plan.has_video else ".mka"
             folder = Path(os.path.expanduser(self.settings.folder))
             try:
                 folder.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 self._rollback(started)
                 raise SessionError(f"Cannot use the folder {folder}: {exc}") from exc
-            out = folder / f"{safe_name(self.settings.prefix or 'JernCast')} {_stamp()}{ext}"
-            cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
-                   "-probesize", "500000", "-analyzeduration", "1000000",
-                   "-f", "mpegts", "-i", "pipe:0", "-map", "0:v?", "-map", "0:a?",
-                   "-c", "copy", "-f", "matroska", str(out)]
-            consumer = Consumer("record", cmd, self._logs() / f"{_stamp()} record.log", droppable=False)
+            out = folder / f"{safe_name(self.settings.prefix or 'JernCast')} {_stamp()}.ts"
+            try:
+                consumer = FileConsumer("record", out, self._logs() / f"{_stamp()} record.log")
+            except OSError as exc:
+                self._rollback(started)
+                raise SessionError(f"Could not create the recording file:\n{exc}") from exc
             self.engine.add_consumer(consumer)
             self.record, self.record_path = consumer, out
-            time.sleep(0.8)
-            if not consumer.alive:
-                message = consumer.problem()
-                self.engine.remove_consumer("record")
-                consumer.close()
-                self.record = self.record_path = None
-                self._rollback(started)
-                raise SessionError("Could not start the recording.\n\n" + message)
+            self._record_has_video = self.engine.plan.has_video
             return out
 
     def stop_recording(self) -> Path | None:
@@ -187,20 +180,26 @@ class Session:
             return final
 
     def _finish(self, path: Path) -> Path | None:
+        """Turn the .ts file into the final MP4 (or MKV) with a quick copy, no re-encoding."""
         if not path.exists() or path.stat().st_size == 0:
             return None
-        if not self.settings.mp4:
-            return path
-        target = path.with_suffix(".mp4" if path.suffix == ".mkv" else ".m4a")
+        has_video = self._record_has_video
+        if self.settings.mp4:
+            target = path.with_suffix(".mp4" if has_video else ".m4a")
+        else:
+            target = path.with_suffix(".mkv" if has_video else ".mka")
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path),
-               "-map", "0", "-c", "copy", "-movflags", "+faststart", str(target)]
+               "-map", "0:v?", "-map", "0:a?", "-c", "copy"]
+        if target.suffix in (".mp4", ".m4a"):
+            cmd += ["-movflags", "+faststart"]
+        cmd.append(str(target))
         try:
             ok = run(cmd, 3600).returncode == 0 and target.exists() and target.stat().st_size > 0
         except Exception:
             log.exception("convert failed")
             ok = False
         if not ok:
-            return path                       # keep the MKV, it is still fine
+            return path                       # keep the .ts, it still plays
         if not self.settings.keep_mkv:
             try:
                 path.unlink()

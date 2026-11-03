@@ -50,7 +50,8 @@ class WindowSmoke(unittest.TestCase):
                         mock.patch.object(project_module, "resolve", fake_resolve)]
         for p in self.patches:
             p.start()
-        sys.modules.pop("jerncast.gui", None)
+        for name in ("jerncast.gui", "jerncast.widgets"):
+            sys.modules.pop(name, None)
         self.gui = importlib.import_module("jerncast.gui")
         core.Settings(folder=self.tmp + "/videos", canvas="640x360", webcam="Cam A", mic="Mic A").save()
         self.app = self.gui.App(self.mods["tkinter"].Tk())
@@ -67,18 +68,19 @@ class WindowSmoke(unittest.TestCase):
                 hk.stop()
             for p in reversed(self.patches):
                 p.stop()
-            sys.modules.pop("jerncast.gui", None)
+            for name in ("jerncast.gui", "jerncast.widgets"):
+                sys.modules.pop(name, None)
             shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_window_shows_the_settings(self):
         a = self.app
-        self.assertEqual(a.cb_layout["values"], ["Screen only", "Screen + webcam", "Webcam only",
-                                                 "Webcam + small screen"])
+        self.assertEqual(a.layout_bar.choices, [1, 2, 3, 4])
+        self.assertEqual(a.layout_caption.get(), "Screen only")
         self.assertIn("1280×720", a.info.get() or a.base_info)
-        self.assertIn("required", a.key_hint.get())
+        self.assertIn("stream key", a.key_hint.get())
         self.assertEqual(sorted(a.project.sources), ["desktop", "mic", "screen", "webcam"])
         self.assertEqual(len(a.hotkeys), 6)                      # record, live, Ctrl+Alt+1..4
-        self.assertEqual(a.recent_list.items, ["No recordings yet. Press Start Recording."])
+        self.assertEqual(a.recent_list.items, ["Nothing recorded yet. Press Start Recording."])
 
     def test_record_change_layout_live_mute_and_stop(self):
         a = self.app
@@ -86,17 +88,18 @@ class WindowSmoke(unittest.TestCase):
         wait_idle(a)
         self.assertTrue(a.session.recording, self.shown)
         a._update_buttons()
-        self.assertEqual(a.rec_btn["text"], "Stop Recording")
+        self.assertIn("Stop Recording", a.rec_btn.text)
         time.sleep(2)
         a._set_layout(2)                                         # screen + webcam, live
         self.assertEqual(a.session.project.current, layout_scene_name(2))
+        self.assertEqual(a.layout_caption.get(), "Screen + webcam")
         a._toggle_webcam()                                       # back to screen only
         self.assertEqual(a.session.project.current, layout_scene_name(1))
         a.v_mic_on.set(False)
         a._audio_on("mic")                                       # mute the mic live
         self.assertTrue(a.session.project.sources["mic"].muted)
         a._update_status()
-        self.assertTrue(a.status.get().startswith("REC"))
+        self.assertTrue(a.pill._shown[0].startswith("REC"))
         a._volume("desktop", 50)
         self.assertEqual(a.session.project.sources["desktop"].volume, 0.5)
         time.sleep(1.5)
@@ -159,7 +162,7 @@ class WindowSmoke(unittest.TestCase):
         a = self.app
         a.v_webcam.set("None")
         a._choices_changed()
-        self.assertEqual(a.cb_layout["values"], ["Screen only"])
+        self.assertEqual(a.layout_bar.choices, [1])
         a._toggle_webcam()
         self.assertIn("webcam", a.note)
 

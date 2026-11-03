@@ -62,6 +62,17 @@ scripts\build-windows.ps1 -Installer     # needs Python, and Inno Setup 6 for th
 Your stream key is saved on your PC only (untick *Remember stream key* under Advanced to not save it) and is
 hidden in logs and messages. Your upload speed must be higher than the bitrate.
 
+## Using little memory
+
+JernCast is built to be light. While nothing is recording it runs no FFmpeg at all. While recording it runs one
+FFmpeg (a second only while streaming), and recordings are written straight to disk with no extra process.
+Measured here with test video (1080p screen + 720p webcam, four layouts, two audio inputs): the FFmpeg engine
+used about **125 MB** at 720p and about **85 MB** at 480p with quality *low*. The window itself adds a small amount
+on top (not measured here, because there is no Windows screen in my test setup).
+
+To use the least memory and CPU: **Output size 480p**, **Quality low**, **30 fps**, no webcam, and stay in the
+full view (Compact view keeps a live preview running).
+
 ## Notes and limits (version 0.0.2)
 
 - **Desktop sound** ("System sound") is captured with Windows' loopback, using the `pyaudiowpatch` package that the
@@ -84,7 +95,7 @@ window's tests use a stand-in for tkinter, so they check what the buttons do, no
 
 - `core.py` settings, devices, encoders · `layouts.py` window choices to scenes · `project.py` scenes and the FFmpeg graph
 - `engine.py` the running FFmpeg and its outputs · `session.py` what the buttons call · `loopback.py` system sound
-- `gui.py` the window · `winutil.py` monitors, windows, hotkeys
+- `gui.py` the window · `widgets.py` its hand-drawn buttons, switches and meters · `winutil.py` monitors, windows, hotkeys
 
 One FFmpeg captures every source, draws every layout, mixes the audio and encodes once. Layout changes, levels and
 mute are commands sent to that running FFmpeg. Its output is relayed to small `ffmpeg -c copy` processes, one saving

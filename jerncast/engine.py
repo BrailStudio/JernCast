@@ -113,6 +113,65 @@ class Consumer:
                 pass
 
 
+class FileConsumer:
+    """Saves the engine's MPEG-TS stream straight to a file. No extra process, so no extra memory.
+
+    A .ts file is safe if the PC crashes (it can be played as it is); it is converted to MP4
+    when recording stops.
+    """
+
+    droppable = False
+    secrets: list = []
+
+    def __init__(self, name: str, path: Path, log_path: Path):
+        self.name = name
+        self.path = path
+        self.log_path = log_path
+        self.broken = False
+        self.error = ""
+        self.dropped = 0
+        self.started_at = time.monotonic()
+        self._file = open(path, "wb", buffering=1024 * 1024)
+        self._queue: queue.Queue = queue.Queue(maxsize=120)
+        self._thread = threading.Thread(target=self._write_loop, daemon=True)
+        self._thread.start()
+
+    def feed(self, data: bytes) -> None:
+        if self.broken:
+            return
+        try:
+            self._queue.put(data, timeout=10)
+        except queue.Full:
+            self.broken, self.error = True, "The disk is too slow to keep up."
+
+    def _write_loop(self) -> None:
+        while True:
+            data = self._queue.get()
+            if data is None:
+                break
+            if self.broken:
+                continue
+            try:
+                self._file.write(data)
+            except OSError as exc:
+                self.broken, self.error = True, f"Could not write the file: {exc}"
+
+    @property
+    def alive(self) -> bool:
+        return not self.broken
+
+    def problem(self) -> str:
+        return self.error
+
+    def close(self, timeout: float = 60) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout)
+        try:
+            self._file.close()
+        except OSError:
+            pass
+
+
 class Engine:
     def __init__(self, ffmpeg: str, plan: Plan, work_dir: Path, log_path: Path,
                  startup_wait: float = 2.0):
@@ -121,7 +180,7 @@ class Engine:
         self.log_path = log_path
         self.meters_dir = work_dir / "meters"
         self.startup_wait = startup_wait
-        self.consumers: dict[str, Consumer] = {}
+        self.consumers: dict = {}
         self.cleanups: list = []           # things to stop with the engine (e.g. the system-sound feeder)
         self.started_at: float | None = None
         self._lock = threading.Lock()
@@ -217,11 +276,11 @@ class Engine:
         shutil.rmtree(self.meters_dir, ignore_errors=True)
 
     # -- consumers ----------------------------------------------------------
-    def add_consumer(self, consumer: Consumer) -> None:
+    def add_consumer(self, consumer) -> None:
         with self._lock:
             self.consumers[consumer.name] = consumer
 
-    def remove_consumer(self, name: str) -> Consumer | None:
+    def remove_consumer(self, name: str):
         with self._lock:
             return self.consumers.pop(name, None)
 

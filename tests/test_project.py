@@ -115,6 +115,14 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):                      # no feeder, no system sound
             build_plan("ffmpeg", p, Settings(), "libx264", MON)
 
+    def test_no_input_uses_thread_queue_size(self):
+        # newer FFmpeg builds fail with "Option thread_queue_size cannot be applied to input url audio=..."
+        p = sample()
+        p.sources["sys"] = SourceDef("sys", "loopback", "System sound")
+        text = " ".join(build_plan("ffmpeg", p, Settings(), "libx264", MON, loopback=(1, 48000, 2)).cmd)
+        self.assertNotIn("thread_queue_size", text)
+        self.assertIn("-i audio=Mic A", text)
+
     def test_corner_size_can_be_a_percent(self):
         from jerncast.project import corner_fraction
         self.assertEqual(corner_fraction("30"), 0.3)
