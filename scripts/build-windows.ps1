@@ -1,12 +1,12 @@
 <#
-  Builds dist\JernCast\JernCast.exe (and, with -Installer, dist\Jerncast-0.0.2-Setup.exe).
+  Builds dist\JernCast\JernCast.exe (and, with -Installer, dist\Jerncast-0.0.3-Setup.exe).
   Needs Python 3.10+ from python.org (tick "Add python.exe to PATH" and keep "tcl/tk" ticked).
   Works fine with 4 GB of RAM.
 
       scripts\build-windows.ps1
       scripts\build-windows.ps1 -Installer
 #>
-param([switch]$Installer)
+param([switch]$Installer, [switch]$WithVirtualCamera)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
@@ -26,8 +26,18 @@ if ($LASTEXITCODE) { throw 'pip failed' }
 python -m pip install pyaudiowpatch
 if ($LASTEXITCODE) { Write-Warning 'pyaudiowpatch could not be installed: no system sound capture in this build.' }
 
+# Virtual camera support (optional, off by default): the pyvirtualcam package talks to a virtual camera driver
+# that must be installed on the PC (OBS Studio's, or Unity Capture). Check pyvirtualcam's licence before you
+# share a build that includes it.
+$vcamArgs = @()
+if ($WithVirtualCamera) {
+    python -m pip install pyvirtualcam numpy
+    if ($LASTEXITCODE) { Write-Warning 'pyvirtualcam could not be installed: no virtual camera in this build.' }
+    else { $vcamArgs = @('--hidden-import', 'pyvirtualcam', '--hidden-import', 'numpy') }
+}
+
 python -m PyInstaller --noconfirm --clean --windowed --name JernCast `
-    --icon assets\jerncast.ico --add-data "assets;assets" --hidden-import pyaudiowpatch `
+    --icon assets\jerncast.ico --add-data "assets;assets" --hidden-import pyaudiowpatch @vcamArgs `
     --exclude-module unittest --exclude-module pydoc --exclude-module doctest jerncast_app.py
 if ($LASTEXITCODE) { throw 'PyInstaller failed' }
 
@@ -47,5 +57,5 @@ if ($Installer) {
     if (-not $iscc) { throw 'Inno Setup 6 not found (https://jrsoftware.org/isdl.php or: choco install innosetup).' }
     & $iscc installer\jerncast.iss
     if ($LASTEXITCODE) { throw 'installer build failed' }
-    Write-Host 'Built: dist\Jerncast-0.0.2-Setup.exe'
+    Write-Host 'Built: dist\Jerncast-0.0.3-Setup.exe'
 }

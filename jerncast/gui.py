@@ -1,50 +1,52 @@
-"""The JernCast window (0.0.2): clear dark cards, light on memory, live preview in compact mode."""
+"""The JernCast window (0.0.3): dockable Scenes / Sources / Audio Mixer / Controls, dark, light on memory."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from . import __version__
-from .core import (IS_WINDOWS, OUTPUT_SIZES, SERVICES, Settings, assets_dir, cached_working_encoders,
-                   data_dir, find_ffmpeg, format_time, list_devices, manage_broadcast_url, pick_microphone)
-from .layouts import LAYOUT_NAMES, available_layouts, layout_scene_name, project_from_settings
+from .core import (IS_WINDOWS, Settings, assets_dir, cached_working_encoders, data_dir, find_ffmpeg, format_time,
+                   list_devices, manage_broadcast_url)
+from .dialogs import SettingsDialog, SourceDialog
+from .dockui import DockHost
+from .docklayout import DOCKS, DockLayout
+from .namedstore import NamedStore
+from .preview import PreviewPane
+from .project import KIND_LABELS, Project, sync_global_audio
 from .session import Session
-from .widgets import LevelBar, Pill, RoundButton, Segmented, Slider, Switch, ui_scale
-from .winutil import HOTKEYS, Hotkey, list_monitors, list_windows
+from .sysinfo import CpuMeter, process_memory_mb
+from .widgets import MuteButton, Pill, RoundButton, VFader, VLevel, ui_scale
+from .winutil import Hotkey, list_monitors
 
 log = logging.getLogger("jerncast")
 
-BG = "#0e1014"
-SURFACE = "#151922"
-FIELD = "#1d2330"
-BORDER = "#252b38"
-TEXT = "#e8ecf4"
-MUTED = "#8a93a6"
-ACCENT = "#4c8dff"
-REC = "#e5484d"
-OK = "#2fbf71"
-WARN = "#f0a93b"
-TRACK = "#2c3342"
-ENTIRE_SCREEN = "Entire screen"
-NONE = "None"
-SYSTEM_SOUND = "System sound"
-CORNERS = ["bottom-right", "bottom-left", "top-right", "top-left"]
+COLORS = {
+    "bg": "#07080b", "surface": "#0f1116", "header": "#161922", "field": "#1a1e29", "border": "#232836",
+    "text": "#e4e8f0", "muted": "#7d8699", "accent": "#4c8dff", "accent_dim": "#1c2c4d",
+    "rec": "#e5484d", "ok": "#2fbf71", "warn": "#f0a93b", "track": "#2a3040",
+}
+C = COLORS
 FONT = "Segoe UI"
+GLOBAL_AUDIO = ("desktop", "mic")
+KIND_FILL = {"display": "#16314f", "window": "#1c3a3a", "webcam": "#3a2a4f", "image": "#4f3a1c",
+             "test_color": "#2a2a2a"}
 
 
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.k = ui_scale(root)
-        self.settings = Settings.load()
+        self.colors = COLORS
         self.ffmpeg = find_ffmpeg()
         self.events: queue.Queue = queue.Queue()
         self.monitors = list_monitors()
@@ -52,43 +54,49 @@ class App:
         self.webcams: list[str] = []
         self.mics: list[str] = []
         self.encoders = ["libx264"]
-        self.project = project_from_settings(self.settings)
+        self.profiles = NamedStore(data_dir() / "profiles", legacy=data_dir() / "settings.json")
+        self.collections = NamedStore(data_dir() / "collections", legacy=data_dir() / "project.json")
+        self.settings = Settings.load(self.profiles.path(self.profiles.current))
+        self.project = Project.load(self.collections.path(self.collections.current))
+        sync_global_audio(self.project, self.settings)
+        self.dock_file = data_dir() / "docks.json"
+        self.layout = self._load_docks()
         self.session = (Session(self.ffmpeg, self.settings, self.project, self.monitors, self.encoders)
                         if self.ffmpeg else None)
         self.busy = False
         self.note = ""
-        self.base_info = ""
+        self.dirty = False
         self.hotkeys: list[Hotkey] = []
-        self.meters: dict[str, list[LevelBar]] = {}
+        self.strips: dict[str, dict] = {}
         self.peaks: dict[str, float] = {}
-        self.preview_photo = None
-        self.preview_mtime = 0.0
-        self.auto_stopped = False
-        self.advanced_open = False
+        self.studio = bool(self.settings.studio_mode)
+        self.preview_name = self.project.current
+        self._last_box_push = 0.0
+        self.cpu = CpuMeter()
         self._ticks = 0
         self._recent_files: list[str] = []
 
         root.title(f"JernCast {__version__}")
-        root.configure(bg=BG)
+        root.configure(bg=C["bg"])
+        root.geometry(f"{int(1120 * self.k)}x{int(780 * self.k)}")
+        root.minsize(int(860 * self.k), int(600 * self.k))
         self._set_icon()
         self._style()
-        self._vars()
         self._build()
-        self.entry_server_row_update()
-        self._update_info()
-        self._refresh_layout_choices()
-        self._apply_compact()
-        self._refresh_recent()
+        root.attributes("-topmost", bool(self.settings.always_on_top))
+        self._refresh_all()
         self._set_hotkeys()
         root.protocol("WM_DELETE_WINDOW", self._exit)
 
         if self.session is None:
             self.note = "FFmpeg was not found. Put ffmpeg.exe next to JernCast.exe."
-            for button in (self.rec_btn, self.live_btn):
+            for button in (self.rec_btn, self.live_btn, self.vcam_btn):
                 button.state(["disabled"])
         else:
             threading.Thread(target=self._probe, daemon=True).start()
-        root.after(200, self._tick)
+            if self.settings.live_preview:
+                self._bg("Starting the preview...", lambda: self.session.set_preview(True), self._started)
+        root.after(300, self._tick)
 
     # ------------------------------------------------------------------ look
     def px(self, n: float) -> int:
@@ -112,528 +120,768 @@ class App:
             st.theme_use("clam")
         except tk.TclError:
             pass
-        self.root.option_add("*TCombobox*Listbox.background", FIELD)
-        self.root.option_add("*TCombobox*Listbox.foreground", TEXT)
-        self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
-        self.root.option_add("*TCombobox*Listbox.font", (FONT, 9))
-        st.configure(".", background=SURFACE, foreground=TEXT, fieldbackground=FIELD, bordercolor=BORDER,
-                     lightcolor=SURFACE, darkcolor=SURFACE, troughcolor=FIELD, font=(FONT, 9))
-        st.configure("TFrame", background=SURFACE)
-        st.configure("Bg.TFrame", background=BG)
-        st.configure("TLabel", background=SURFACE, foreground=TEXT)
-        st.configure("Muted.TLabel", foreground=MUTED)
-        st.configure("Warn.TLabel", foreground=WARN)
-        st.configure("Ok.TLabel", foreground=OK)
-        st.configure("Name.TLabel", background=BG, foreground=TEXT, font=(FONT, 15, "bold"))
-        st.configure("Info.TLabel", background=BG, foreground=MUTED)
-        st.configure("Card.TLabel", foreground=MUTED, font=(FONT, 8, "bold"))
-        st.configure("Link.TLabel", foreground=ACCENT)
-        st.configure("TCombobox", fieldbackground=FIELD, background=FIELD, foreground=TEXT, arrowcolor=MUTED,
-                     borderwidth=0, padding=4)
-        st.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", TEXT)],
-               background=[("active", FIELD)])
-        st.configure("TEntry", fieldbackground=FIELD, foreground=TEXT, insertcolor=TEXT, borderwidth=0, padding=5)
-        st.configure("TCheckbutton", background=SURFACE, foreground=TEXT)
-        st.map("TCheckbutton", background=[("active", SURFACE)])
-        st.configure("TButton", background=FIELD, foreground=TEXT, padding=(10, 4), borderwidth=0)
-        st.map("TButton", background=[("active", "#272f3f")])
-
-    def _vars(self) -> None:
-        s = self.settings
-        self.v_screen = tk.StringVar(value=s.screen)
-        self.v_window = tk.StringVar(value=s.window or ENTIRE_SCREEN)
-        self.v_fps = tk.IntVar(value=s.fps)
-        self.v_duration = tk.StringVar(value=str(s.duration_min or ""))
-        self.v_folder = tk.StringVar(value=s.folder)
-        self.v_prefix = tk.StringVar(value=s.prefix)
-        self.v_service = tk.StringVar(value=s.stream_service)
-        self.v_server = tk.StringVar(value=s.stream_server)
-        self.v_key = tk.StringVar(value=s.stream_key)
-        self.v_mic = tk.StringVar(value=s.mic or NONE)
-        self.v_mic_on = tk.BooleanVar(value=s.mic_on)
-        self.v_desktop = tk.StringVar(value=SYSTEM_SOUND if s.desktop == "loopback" else (s.desktop or NONE))
-        self.v_desktop_on = tk.BooleanVar(value=s.desktop_on)
-        self.v_layout_num = tk.IntVar(value=s.layout)
-        self.v_layout = tk.StringVar(value=LAYOUT_NAMES.get(s.layout, LAYOUT_NAMES[1]))
-        self.v_webcam = tk.StringVar(value=s.webcam or NONE)
-        self.v_corner = tk.StringVar(value=s.cam_corner)
-        self.v_encoder = tk.StringVar(value=s.encoder)
-        self.v_output = tk.StringVar(value=next((k for k, v in OUTPUT_SIZES.items() if v == s.canvas), "720p"))
-        self.v_quality = tk.StringVar(value=s.quality)
-        self.v_kbps = tk.StringVar(value=str(s.kbps))
-        self.v_cursor = tk.BooleanVar(value=s.show_cursor)
-        self.v_mp4 = tk.BooleanVar(value=s.mp4)
-        self.v_remember = tk.BooleanVar(value=s.remember_key)
-        self.v_hk_rec = tk.StringVar(value=s.hotkey_record)
-        self.v_hk_live = tk.StringVar(value=s.hotkey_stream)
-        self.info = tk.StringVar(value="")
-        self.key_hint = tk.StringVar(value="")
-        self.layout_caption = tk.StringVar(value="")
+        for option, value in (("background", C["field"]), ("foreground", C["text"]), ("selectBackground", C["accent"]),
+                              ("font", (FONT, 9))):
+            self.root.option_add(f"*TCombobox*Listbox.{option}", value)
+        st.configure(".", background=C["surface"], foreground=C["text"], fieldbackground=C["field"],
+                     bordercolor=C["border"], lightcolor=C["surface"], darkcolor=C["surface"],
+                     troughcolor=C["field"], font=(FONT, 9))
+        st.configure("TFrame", background=C["surface"])
+        st.configure("TLabel", background=C["surface"], foreground=C["text"])
+        st.configure("TCombobox", fieldbackground=C["field"], background=C["field"], foreground=C["text"],
+                     arrowcolor=C["muted"], borderwidth=0, padding=4)
+        st.map("TCombobox", fieldbackground=[("readonly", C["field"])], foreground=[("readonly", C["text"])])
+        st.configure("TEntry", fieldbackground=C["field"], foreground=C["text"], insertcolor=C["text"],
+                     borderwidth=0, padding=5)
+        st.configure("TCheckbutton", background=C["surface"], foreground=C["text"])
+        st.configure("TRadiobutton", background=C["surface"], foreground=C["text"])
+        st.configure("TButton", background=C["field"], foreground=C["text"], padding=(10, 4), borderwidth=0)
+        st.map("TButton", background=[("active", "#262d3d")])
+        st.configure("TNotebook", background=C["surface"], borderwidth=0)
+        st.configure("TNotebook.Tab", background=C["header"], foreground=C["muted"], padding=(12, 5))
+        st.map("TNotebook.Tab", background=[("selected", C["field"])], foreground=[("selected", C["text"])])
 
     # ---------------------------------------------------------------- layout
-    def _card(self, parent, title: str, pady=(0, 10)):
-        outer = tk.Frame(parent, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
-        outer.pack(fill="x", pady=pady)
-        ttk.Label(outer, text=title.upper(), style="Card.TLabel").pack(anchor="w", padx=14, pady=(10, 4))
-        body = ttk.Frame(outer)
-        body.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-        body.columnconfigure(1, weight=1)
-        return outer, body
+    def _label(self, parent, text="", *, fg=None, bg=None, font=None, **kw):
+        return tk.Label(parent, text=text, bg=bg or C["surface"], fg=fg or C["text"], font=font or (FONT, 9), **kw)
 
-    def _row(self, body, row, label, widget, sticky="ew"):
-        ttk.Label(body, text=label, style="Muted.TLabel").grid(row=row, column=0, sticky="w", pady=4, padx=(0, 12))
-        widget.grid(row=row, column=1, sticky=sticky)
+    def _tool(self, parent, text, command, *, width=30, bg=None):
+        button = RoundButton(parent, text, command, surface=C["surface"], bg=bg or C["field"], fg=C["text"],
+                             height=26, width=width, radius=6, font=(FONT, 10, "bold"), scale=self.k)
+        button.pack(side="left", padx=(0, 4))
+        return button
 
-    def _combo(self, parent, var, values, command=None, width=24, readonly=True, **kw):
-        box = ttk.Combobox(parent, textvariable=var, values=values, width=width,
-                           state="readonly" if readonly else "normal", **kw)
-        if command:
-            box.bind("<<ComboboxSelected>>", lambda _e: command())
+    def _listbox(self, parent, height=6):
+        box = tk.Listbox(parent, height=height, bg=C["field"], fg=C["text"], selectbackground=C["accent"],
+                         selectforeground="#ffffff", highlightthickness=0, bd=0, activestyle="none",
+                         exportselection=False, font=(FONT, 10))
+        box.pack(fill="both", expand=True)
         return box
-
-    def _bar(self, parent, source_id: str, width=110) -> LevelBar:
-        bar = LevelBar(parent, surface=SURFACE, track=TRACK, width=width, scale=self.k)
-        self.meters.setdefault(source_id, []).append(bar)
-        return bar
-
-    def _slider(self, parent, lo, hi, value, command, width=120) -> Slider:
-        return Slider(parent, lo, hi, value, command, surface=SURFACE, track=TRACK, accent=ACCENT,
-                      width=width, scale=self.k)
-
-    def _switch(self, parent, var, command) -> Switch:
-        return Switch(parent, var, command, surface=SURFACE, on=ACCENT, off=TRACK, scale=self.k)
-
-    def _segmented(self, parent, options, var, command, seg_width=44) -> Segmented:
-        return Segmented(parent, options, var, command, surface=SURFACE, field=FIELD, accent=ACCENT,
-                         seg_width=seg_width, scale=self.k)
-
-    def _button(self, parent, text, command, *, bg, surface=BG, outline=None, width=140, height=40, fg="#ffffff"):
-        return RoundButton(parent, text, command, surface=surface, bg=bg, fg=fg, outline=outline,
-                           width=width, height=height, scale=self.k)
 
     def _build(self) -> None:
         root = self.root
-        head = ttk.Frame(root, style="Bg.TFrame")
-        head.pack(fill="x", padx=18, pady=(14, 8))
+        self._build_menubar()
+        self._build_statusbar()
+        self.host = DockHost(root, self.layout, self._docks_changed, COLORS, self.k)
+        self.host.outer.pack(fill="both", expand=True, padx=self.px(6), pady=(self.px(6), 0))
+        self._build_preview(self.host.center)
+        for key in DOCKS:
+            self.host.add_dock(key)
+        self._build_scenes(self.host.docks["scenes"].body)
+        self._build_sources(self.host.docks["sources"].body)
+        self._build_mixer(self.host.docks["mixer"].body)
+        self._build_controls(self.host.docks["controls"].body)
+        self._build_recent(self.host.docks["recent"].body)
+        self.host.relayout()
+
+    # ---- menu bar
+    def _build_menubar(self) -> None:
+        bar = tk.Frame(self.root, bg=C["header"])
+        bar.pack(fill="x")
         if self.icon is not None:
-            self.small_icon = self.icon.subsample(max(1, int(8 / self.k)), max(1, int(8 / self.k)))
-            tk.Label(head, image=self.small_icon, bg=BG).pack(side="left", padx=(0, 10))
-        titles = ttk.Frame(head, style="Bg.TFrame")
-        titles.pack(side="left")
-        ttk.Label(titles, text="JernCast", style="Name.TLabel").pack(anchor="w")
-        ttk.Label(titles, textvariable=self.info, style="Info.TLabel").pack(anchor="w")
-        self.compact_btn = self._button(head, "Compact view", self._toggle_compact, bg=FIELD, width=110, height=32)
-        self.compact_btn.pack(side="right")
-        self.pill = Pill(head, "Ready", OK, surface=BG, scale=self.k)
-        self.pill.pack(side="right", padx=14)
+            self.small_icon = self.icon.subsample(max(1, int(11 / self.k)), max(1, int(11 / self.k)))
+            tk.Label(bar, image=self.small_icon, bg=C["header"]).pack(side="left", padx=(8, 4))
+        for title, builder in (("File", self._menu_file), ("View", self._menu_view), ("Docks", self._menu_docks),
+                               ("Profile", self._menu_profile), ("Scene Collection", self._menu_collection),
+                               ("Tools", self._menu_tools), ("Help", self._menu_help)):
+            label = tk.Label(bar, text=title, bg=C["header"], fg=C["text"], font=(FONT, 9), padx=10, pady=5,
+                             cursor="hand2")
+            label.pack(side="left")
+            label.bind("<Button-1>", lambda _e, b=builder, w=label: self._popup(w, b))
+            label.bind("<Enter>", lambda _e, w=label: w.configure(bg=C["field"]))
+            label.bind("<Leave>", lambda _e, w=label: w.configure(bg=C["header"]))
 
-        bottom = ttk.Frame(root, style="Bg.TFrame")
-        bottom.pack(fill="x", padx=18, pady=(8, 16), side="bottom")
-        self.rec_btn = self._button(bottom, "●  Start Recording", self._toggle_record, bg=REC, width=200, height=46)
-        self.rec_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.live_btn = self._button(bottom, "Go live", self._toggle_live, bg=FIELD, outline=BORDER, width=160,
-                                     height=46)
-        self.live_btn.pack(side="left", fill="x", expand=True, padx=8)
-        self.manage_btn = self._button(bottom, "Manage Broadcast", self._manage_broadcast, bg=BG, outline=BORDER,
-                                       width=150, height=46, fg=MUTED)
-        self.manage_btn.pack(side="left", padx=(8, 0))
+    def _new_menu(self):
+        return tk.Menu(self.root, tearoff=0, bg=C["header"], fg=C["text"], activebackground=C["accent"],
+                       activeforeground="#ffffff", bd=0, relief="flat", font=(FONT, 9))
 
-        self.main = ttk.Frame(root, style="Bg.TFrame")
-        self.main.pack(fill="both", expand=True, padx=18)
+    def _popup(self, widget, builder) -> None:
+        menu = self._new_menu()
+        builder(menu)
+        try:
+            menu.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height())
+        finally:
+            menu.grab_release()
 
-        # ---- compact view
-        self.compact_view = ttk.Frame(self.main, style="Bg.TFrame")
-        self.preview = tk.Canvas(self.compact_view, bg="#050608", highlightthickness=1, highlightbackground=BORDER,
-                                 width=self.px(480), height=self.px(270))
-        self.preview.pack(pady=(6, 10))
-        strip = tk.Frame(self.compact_view, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
-        strip.pack(fill="x")
-        inner = ttk.Frame(strip)
-        inner.pack(fill="x", padx=14, pady=10)
-        for text, sid in (("Mic", "mic"), ("Desktop", "desktop")):
-            ttk.Label(inner, text=text, style="Muted.TLabel").pack(side="left", padx=(0, 6))
-            self._bar(inner, sid, 90).pack(side="left", padx=(0, 16))
-        self.compact_layout = self._segmented(inner, [1], self.v_layout_num, self._layout_picked, 36)
-        self.compact_layout.pack(side="right")
-        ttk.Label(inner, text="Layout", style="Muted.TLabel").pack(side="right", padx=(0, 8))
+    @staticmethod
+    def _tick_label(text: str, on: bool) -> str:
+        return ("✓  " if on else "      ") + text
 
-        # ---- full view
-        self.cards = ttk.Frame(self.main, style="Bg.TFrame")
-        left = ttk.Frame(self.cards, style="Bg.TFrame")
-        right = ttk.Frame(self.cards, style="Bg.TFrame")
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        self._build_capture(left)
-        self._build_stream(left)
-        self._build_recent(left)
-        self._build_audio(right)
-        self._build_webcam(right)
-        self._build_advanced(right)
+    def _menu_file(self, menu) -> None:
+        menu.add_command(label="Show Recordings", command=self._open_folder)
+        menu.add_command(label="Settings", command=self._open_settings)
+        menu.add_separator()
+        menu.add_command(label="Exit", command=self._exit)
 
-    def _build_capture(self, parent) -> None:
-        _, body = self._card(parent, "Capture")
-        self.cb_screen = self._combo(body, self.v_screen, [m.name for m in self.monitors], self._choices_changed)
-        self._row(body, 0, "Screen", self.cb_screen)
-        self.cb_window = self._combo(body, self.v_window, [ENTIRE_SCREEN], self._choices_changed,
-                                     postcommand=self._refresh_windows)
-        self._row(body, 1, "Window", self.cb_window)
-        self._row(body, 2, "Frame rate", self._segmented(body, [30, 60], self.v_fps, self._choices_changed),
-                  sticky="w")
-        dur = ttk.Frame(body)
-        ttk.Entry(dur, textvariable=self.v_duration, width=6).pack(side="left")
-        ttk.Label(dur, text="minutes  (empty: until you stop)", style="Muted.TLabel").pack(side="left", padx=8)
-        self._row(body, 3, "Stop after", dur, sticky="w")
-        folder = ttk.Frame(body)
-        ttk.Entry(folder, textvariable=self.v_folder).pack(side="left", fill="x", expand=True)
-        ttk.Button(folder, text="Browse", command=self._browse).pack(side="left", padx=(6, 0))
-        self._row(body, 4, "Save to", folder)
-        self._row(body, 5, "File name", ttk.Entry(body, textvariable=self.v_prefix))
+    def _menu_view(self, menu) -> None:
+        menu.add_command(label=self._tick_label("Lock Docks", self.layout.locked), command=self._toggle_lock)
+        menu.add_command(label="      Reset Docks", command=self.host.reset)
+        menu.add_separator()
+        menu.add_command(label=self._tick_label("Live Preview", self.settings.live_preview),
+                         command=self._toggle_live_preview)
+        menu.add_command(label=self._tick_label("Studio Mode", self.studio), command=self._toggle_studio)
+        menu.add_command(label=self._tick_label("Always on Top", self.settings.always_on_top),
+                         command=self._toggle_on_top)
 
-    def _build_stream(self, parent) -> None:
-        _, body = self._card(parent, "Stream")
-        self._row(body, 0, "Service", self._combo(body, self.v_service, list(SERVICES), self._service_changed))
-        self.server_label = ttk.Label(body, text="Server", style="Muted.TLabel")
-        self.entry_server = ttk.Entry(body, textvariable=self.v_server)
-        self.server_label.grid(row=1, column=0, sticky="w", pady=4, padx=(0, 12))
-        self.entry_server.grid(row=1, column=1, sticky="ew")
-        key = ttk.Frame(body)
-        self.entry_key = ttk.Entry(key, textvariable=self.v_key, show="*")
-        self.entry_key.pack(side="left", fill="x", expand=True)
-        self.show_key = False
-        self.key_toggle = ttk.Button(key, text="Show", width=6, command=self._show_key)
-        self.key_toggle.pack(side="left", padx=(6, 0))
-        self._row(body, 2, "Stream key", key)
-        self.key_label = ttk.Label(body, textvariable=self.key_hint, style="Warn.TLabel")
-        self.key_label.grid(row=3, column=1, sticky="w", pady=(2, 0))
-        self.v_key.trace_add("write", lambda *_: self._update_key_hint())
-        self._update_key_hint()
+    def _menu_docks(self, menu) -> None:
+        for key, title in DOCKS.items():
+            menu.add_command(label=self._tick_label(title, self.layout.is_visible(key)),
+                             command=lambda k=key: self.host.toggle(k))
 
-    def _build_recent(self, parent) -> None:
-        outer, body = self._card(parent, "Recent recordings", pady=(0, 0))
-        self.recent_list = tk.Listbox(body, height=4, bg=FIELD, fg=TEXT, selectbackground=ACCENT, highlightthickness=0,
-                                      bd=0, activestyle="none", font=(FONT, 9))
-        self.recent_list.grid(row=0, column=0, columnspan=2, sticky="nsew")
-        self.recent_list.bind("<Double-Button-1>", lambda _e: self._open_recent())
-        row = ttk.Frame(body)
-        row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Button(row, text="Open", command=self._open_recent).pack(side="left")
-        ttk.Button(row, text="Open folder", command=self._open_folder).pack(side="left", padx=6)
+    def _named_menu(self, menu, store: NamedStore, switch, new, rename, remove) -> None:
+        for name in store.names():
+            menu.add_command(label=("●  " if name == store.current else "      ") + name,
+                             command=lambda n=name: switch(n))
+        menu.add_separator()
+        menu.add_command(label="      New", command=new)
+        menu.add_command(label="      Rename", command=rename)
+        menu.add_command(label="      Remove", command=remove)
 
-    def _build_audio(self, parent) -> None:
-        _, body = self._card(parent, "Audio")
-        self.cb_mic = self._combo(body, self.v_mic, [NONE], self._choices_changed)
-        self._row(body, 0, "Microphone", self.cb_mic)
-        mic = ttk.Frame(body)
-        self._switch(mic, self.v_mic_on, lambda: self._audio_on("mic")).pack(side="left")
-        self.mic_slider = self._slider(mic, 0, 200, self.settings.mic_volume, lambda v: self._volume("mic", v))
-        self.mic_slider.pack(side="left", padx=10)
-        self._bar(mic, "mic").pack(side="left")
-        self._row(body, 1, "", mic, sticky="w")
-        self.cb_desktop = self._combo(body, self.v_desktop, [SYSTEM_SOUND, NONE], self._choices_changed)
-        self._row(body, 2, "Desktop sound", self.cb_desktop)
-        desk = ttk.Frame(body)
-        self._switch(desk, self.v_desktop_on, lambda: self._audio_on("desktop")).pack(side="left")
-        self.desk_slider = self._slider(desk, 0, 200, self.settings.desktop_volume,
-                                        lambda v: self._volume("desktop", v))
-        self.desk_slider.pack(side="left", padx=10)
-        self._bar(desk, "desktop").pack(side="left")
-        self._row(body, 3, "", desk, sticky="w")
+    def _menu_profile(self, menu) -> None:
+        self._named_menu(menu, self.profiles, self._switch_profile, lambda: self._store_new(self.profiles, True),
+                         lambda: self._store_rename(self.profiles), lambda: self._store_remove(self.profiles))
 
-    def _build_webcam(self, parent) -> None:
-        _, body = self._card(parent, "Webcam and layout")
-        self.cb_webcam = self._combo(body, self.v_webcam, [NONE], self._choices_changed)
-        self._row(body, 0, "Webcam", self.cb_webcam)
-        lay = ttk.Frame(body)
-        self.layout_bar = self._segmented(lay, [1], self.v_layout_num, self._layout_picked, 36)
-        self.layout_bar.pack(side="left")
-        ttk.Label(lay, textvariable=self.layout_caption, style="Muted.TLabel").pack(side="left", padx=10)
-        self._row(body, 1, "Layout", lay, sticky="w")
-        self._row(body, 2, "Webcam corner", self._combo(body, self.v_corner, CORNERS, self._choices_changed, width=14),
-                  sticky="w")
-        self.cam_slider = self._slider(body, 10, 50, self.settings.cam_size, self._cam_size, width=150)
-        self._row(body, 3, "Webcam size", self.cam_slider, sticky="w")
-        ttk.Label(body, text="Switch layouts any time with Ctrl+Alt+1 to 4.", style="Muted.TLabel").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+    def _menu_collection(self, menu) -> None:
+        self._named_menu(menu, self.collections, self._switch_collection,
+                         lambda: self._store_new(self.collections, False),
+                         lambda: self._store_rename(self.collections), lambda: self._store_remove(self.collections))
 
-    def _build_advanced(self, parent) -> None:
-        outer = tk.Frame(parent, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
-        outer.pack(fill="x")
-        self.adv_toggle = ttk.Label(outer, text="ADVANCED   ▸", style="Card.TLabel", cursor="hand2")
-        self.adv_toggle.pack(anchor="w", padx=14, pady=10)
-        self.adv_toggle.bind("<Button-1>", lambda _e: self._toggle_advanced())
-        self.adv_body = ttk.Frame(outer)
-        body = self.adv_body
-        body.columnconfigure(1, weight=1)
-        self.cb_encoder = self._combo(body, self.v_encoder, ["auto"], self._choices_changed, width=14)
-        self._row(body, 0, "Encoder", self.cb_encoder, sticky="w")
-        self._row(body, 1, "Output size", self._combo(body, self.v_output, list(OUTPUT_SIZES), self._choices_changed,
-                                                      width=8), sticky="w")
-        self._row(body, 2, "Quality", self._combo(body, self.v_quality, ["high", "medium", "low"],
-                                                  self._choices_changed, width=8), sticky="w")
-        self._row(body, 3, "Top bitrate (kbps)", self._combo(
-            body, self.v_kbps, ["1500", "2500", "3500", "4500", "6000", "8000"], self._choices_changed, width=8,
-            readonly=False), sticky="w")
-        hk = ttk.Frame(body)
-        ttk.Label(hk, text="Record", style="Muted.TLabel").pack(side="left")
-        self._combo(hk, self.v_hk_rec, HOTKEYS, self._hotkeys_changed, width=5).pack(side="left", padx=(6, 14))
-        ttk.Label(hk, text="Live", style="Muted.TLabel").pack(side="left")
-        self._combo(hk, self.v_hk_live, HOTKEYS, self._hotkeys_changed, width=5).pack(side="left", padx=6)
-        self._row(body, 4, "Hotkeys", hk, sticky="w")
-        for r, (text, var) in enumerate((("Show the mouse cursor", self.v_cursor),
-                                         ("Convert recordings to MP4 when finished", self.v_mp4),
-                                         ("Remember the stream key on this PC", self.v_remember)), start=5):
-            ttk.Checkbutton(body, text=text, variable=var, command=self._choices_changed).grid(
-                row=r, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Button(body, text="Open logs folder", command=self._open_logs).grid(
-            row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    def _menu_tools(self, menu) -> None:
+        menu.add_command(label="Open Logs Folder", command=self._open_logs)
+        menu.add_command(label="Show Recordings", command=self._open_folder)
 
-    def _toggle_advanced(self) -> None:
-        self.advanced_open = not self.advanced_open
-        if self.advanced_open:
-            self.adv_body.pack(fill="x", padx=14, pady=(0, 12))
+    def _menu_help(self, menu) -> None:
+        menu.add_command(label="About JernCast", command=self._about)
+
+    # ---- status bar
+    def _build_statusbar(self) -> None:
+        bar = tk.Frame(self.root, bg=C["header"])
+        bar.pack(fill="x", side="bottom")
+        self.pill = Pill(bar, "Ready", C["ok"], surface=C["header"], scale=self.k)
+        self.pill.pack(side="left", padx=8, pady=4)
+        self.note_label = tk.Label(bar, text="", bg=C["header"], fg=C["muted"], font=(FONT, 9))
+        self.note_label.pack(side="left")
+        self.stats = tk.Label(bar, text="", bg=C["header"], fg=C["muted"], font=(FONT, 9))
+        self.stats.pack(side="right", padx=10)
+
+    # ---- preview (centre)
+    def _build_preview(self, parent) -> None:
+        box = tk.Frame(parent, bg=C["bg"])
+        box.pack(fill="both", expand=True, padx=(0, self.px(6)), pady=(0, self.px(6)))
+        self.panes = tk.Frame(box, bg=C["bg"])
+        self.panes.pack(fill="both", expand=True)
+        self.edit_pane = PreviewPane(self.panes, self, editable=True, live=not self.studio, title="",
+                                     scene_getter=self._edit_scene)
+        self.program_pane = PreviewPane(self.panes, self, editable=False, live=True, title="PROGRAM (live)",
+                                        scene_getter=lambda: self.project.scene(self.project.current))
+        strip = tk.Frame(box, bg=C["surface"], highlightbackground=C["border"], highlightthickness=1)
+        strip.pack(fill="x", pady=(6, 0))
+        inner = tk.Frame(strip, bg=C["surface"])
+        inner.pack(fill="x", padx=8, pady=6)
+        self.selected_label = self._label(inner, "No source selected", fg=C["muted"])
+        self.selected_label.pack(side="left")
+        self.preview_btn = RoundButton(inner, "Live preview: off", self._toggle_live_preview, surface=C["surface"],
+                                       bg=C["field"], fg=C["text"], height=26, width=130, radius=6,
+                                       font=(FONT, 9, "bold"), scale=self.k)
+        self.preview_btn.pack(side="right")
+        RoundButton(inner, "Properties", self._properties, surface=C["surface"], bg=C["field"], fg=C["text"],
+                    height=26, width=90, radius=6, font=(FONT, 9, "bold"), scale=self.k).pack(side="right", padx=6)
+        self.transition_btn = RoundButton(inner, "Transition  ▶", self._transition, surface=C["surface"],
+                                          bg=C["accent"], fg="#ffffff", height=26, width=110, radius=6,
+                                          font=(FONT, 9, "bold"), scale=self.k)
+        self._layout_panes()
+
+    def _layout_panes(self) -> None:
+        """One preview normally; in Studio Mode a Preview (edit) next to the Program (live) with a Transition button."""
+        for pane in (self.edit_pane, self.program_pane):
+            pane.frame.pack_forget()
+        self.edit_pane.title_label.pack_forget()
+        self.transition_btn.pack_forget()
+        if self.studio:
+            self.edit_pane.title_label.configure(text="PREVIEW (edit the next scene)")
+            self.edit_pane.title_label.pack(anchor="w", padx=8, pady=(6, 0), before=self.edit_pane.canvas)
+            self.edit_pane.frame.pack(side="left", fill="both", expand=True, padx=(0, 3))
+            self.program_pane.frame.pack(side="left", fill="both", expand=True, padx=(3, 0))
+            self.transition_btn.pack(side="right", padx=(0, 6))
         else:
-            self.adv_body.pack_forget()
-        self.adv_toggle.configure(text="ADVANCED   " + ("▾" if self.advanced_open else "▸"))
+            self.edit_pane.frame.pack(fill="both", expand=True)
 
-    # ----------------------------------------------------------- compact mode
-    def _toggle_compact(self) -> None:
-        self.settings.compact = not self.settings.compact
-        self._apply_compact()
-        self.settings.save()
+    @property
+    def live_image_shown(self) -> bool:
+        return self.edit_pane.live_shown or (self.studio and self.program_pane.live_shown)
 
-    def _apply_compact(self) -> None:
-        compact = self.settings.compact
-        self.cards.pack_forget()
-        self.compact_view.pack_forget()
-        if compact:
-            self.compact_view.pack(fill="both", expand=True)
-            self.compact_btn.style(text="Full view")
-            self.root.minsize(self.px(560), self.px(500))
-            self.root.geometry(f"{self.px(600)}x{self.px(600)}")
-            self._set_preview_wanted(True)
-        else:
-            self.cards.pack(fill="both", expand=True)
-            self.compact_btn.style(text="Compact view")
-            self.root.minsize(self.px(900), self.px(640))
-            self.root.geometry(f"{self.px(980)}x{self.px(760)}")
-            self._set_preview_wanted(False)
+    def _draw_layout_preview(self) -> None:
+        self.edit_pane.redraw()
+        if self.studio:
+            self.program_pane.redraw()
 
-    def _set_preview_wanted(self, wanted: bool) -> None:
-        s = self.session
-        if s is None:
+    # ---- which scene is being edited, and which source is selected
+    @property
+    def edit_name(self) -> str:
+        names = [s.name for s in self.project.scenes]
+        if self.studio and self.preview_name in names:
+            return self.preview_name
+        return self.project.current
+
+    def _edit_scene(self):
+        return self.project.scene(self.edit_name)
+
+    def selected_index(self):
+        return self._selected_item()
+
+    def select_item(self, index) -> None:
+        self.source_list.selection_clear(0, "end")
+        if index is not None:
+            self.source_list.selection_set(len(self._edit_scene().items) - 1 - index)      # the list shows front first
+        self._update_selected_label()
+        self._draw_layout_preview()
+
+    def item_box_changed(self, index: int, box, final: bool) -> None:
+        """A source was dragged or resized in the preview. Live changes are sent to the running engine, a few a second."""
+        scene = self._edit_scene()
+        item = scene.items[index]
+        item.layout, item.box = "free", [float(v) for v in box]
+        now = time.monotonic()
+        if self.session is not None and (final or now - self._last_box_push > 0.4):
+            self._last_box_push = now
+            self.session.set_item_box(scene.name, index, box)
+        if final:
+            self.dirty = True
+
+    # ---- Studio Mode
+    def _toggle_studio(self) -> None:
+        self.studio = not self.studio
+        self.settings.studio_mode = self.studio
+        self.preview_name = self.project.current
+        self.edit_pane.live = not self.studio
+        self.edit_pane.live_shown, self.edit_pane.photo, self.edit_pane.mtime = False, None, 0.0
+        self._layout_panes()
+        self._refresh_scenes()
+        self._refresh_sources()
+        self._draw_layout_preview()
+        self._save()
+
+    def _transition(self) -> None:
+        """Send the Preview scene live (a cut), and keep the old Program scene in Preview so you can go back."""
+        if not self.studio:
             return
-        if wanted and not s.running:
-            self._bg("Starting the preview...", lambda: s.set_preview(True), self._started)
-        elif not wanted and s.preview_wanted:
-            self._bg("", lambda: s.set_preview(False), self._started)
+        old, new = self.project.current, self.preview_name
+        if new == old or new not in [s.name for s in self.project.scenes]:
+            self.note = "Pick a different scene to transition to."
+            return
+        self._select_scene(new)
+        self.preview_name = old
+        self._refresh_scenes()
+        self._refresh_sources()
+        self._draw_layout_preview()
+
+    # ---- Scenes dock
+    def _build_scenes(self, body) -> None:
+        bar = tk.Frame(body, bg=C["surface"])
+        bar.pack(side="bottom", fill="x", pady=(6, 0))
+        self.scene_list = self._listbox(body)
+        self.scene_list.bind("<<ListboxSelect>>", lambda _e: self._on_scene_select())
+        self.scene_list.bind("<Double-Button-1>", lambda _e: self._rename_scene())
+        self.scene_list.bind("<Button-3>", lambda e: self._context(e, self.scene_list, self._scene_menu))
+        self._tool(bar, "+", self._add_scene)
+        self._tool(bar, "−", self._remove_scene)
+        self._tool(bar, "▲", lambda: self._move_scene(-1))
+        self._tool(bar, "▼", lambda: self._move_scene(1))
+
+    def _scene_menu(self, menu) -> None:
+        menu.add_command(label="Rename", command=self._rename_scene)
+        menu.add_command(label="Move up", command=lambda: self._move_scene(-1))
+        menu.add_command(label="Move down", command=lambda: self._move_scene(1))
+        menu.add_separator()
+        menu.add_command(label="Remove", command=self._remove_scene)
+
+    # ---- Sources dock
+    def _build_sources(self, body) -> None:
+        bar = tk.Frame(body, bg=C["surface"])
+        bar.pack(side="bottom", fill="x", pady=(6, 0))
+        self.source_list = self._listbox(body)
+        self.source_list.bind("<ButtonRelease-1>", self._source_clicked)
+        self.source_list.bind("<Double-Button-1>", lambda _e: self._properties())
+        self.source_list.bind("<Button-3>", lambda e: self._context(e, self.source_list, self._source_menu))
+        self.add_btn = self._tool(bar, "+", self._add_menu)
+        self._tool(bar, "−", self._remove_source)
+        self._tool(bar, "⚙", self._properties)
+        self._tool(bar, "▲", lambda: self._move_source(1))
+        self._tool(bar, "▼", lambda: self._move_source(-1))
+
+    def _source_menu(self, menu) -> None:
+        menu.add_command(label="Properties", command=self._properties)
+        menu.add_command(label="Show / Hide", command=self._toggle_visible)
+        menu.add_command(label="Move up", command=lambda: self._move_source(1))
+        menu.add_command(label="Move down", command=lambda: self._move_source(-1))
+        menu.add_separator()
+        menu.add_command(label="Remove", command=self._remove_source)
+
+    def _add_menu(self) -> None:
+        menu = self._new_menu()
+        for kind in ("display", "window", "webcam", "image"):
+            menu.add_command(label=KIND_LABELS[kind], command=lambda k=kind: self._add_source(k))
+        menu.add_command(label="Audio input (mixer)", command=lambda: self._add_source("audio"))
+        try:
+            menu.tk_popup(self.add_btn.winfo_rootx(), self.add_btn.winfo_rooty() + self.add_btn.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _context(self, event, listbox, builder) -> None:
+        index = listbox.nearest(event.y)
+        if index is not None and index >= 0:
+            listbox.selection_clear(0, "end")
+            listbox.selection_set(index)
+            listbox.event_generate("<<ListboxSelect>>")
+        menu = self._new_menu()
+        builder(menu)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    # ---- Audio Mixer dock
+    def _build_mixer(self, body) -> None:
+        self.mixer_row = tk.Frame(body, bg=C["surface"])
+        self.mixer_row.pack(fill="both", expand=True)
+
+    def _rebuild_mixer(self) -> None:
+        for child in self.mixer_row.winfo_children():
+            child.destroy()
+        self.strips = {}
+        audios = self.project.audio_sources()
+        for src in sorted(audios, key=lambda s: (s.id not in GLOBAL_AUDIO,
+                                                 GLOBAL_AUDIO.index(s.id) if s.id in GLOBAL_AUDIO else 0, s.id)):
+            strip = tk.Frame(self.mixer_row, bg=C["field"], padx=8, pady=6)
+            strip.pack(side="left", fill="y", padx=(0, 6))
+            self._label(strip, src.name, bg=C["field"], font=(FONT, 9, "bold")).pack()
+            mid = tk.Frame(strip, bg=C["field"])
+            mid.pack(pady=4)
+            level = VLevel(mid, surface=C["field"], track="#0a0c12", height=110, scale=self.k)
+            level.pack(side="left", padx=(0, 6))
+            fader = VFader(mid, int(src.volume * 100), lambda v, sid=src.id: self._on_volume(sid, v),
+                           surface=C["field"], track=C["track"], accent=C["accent"], height=110, scale=self.k)
+            fader.pack(side="left")
+            var = tk.BooleanVar(value=src.muted)
+            row = tk.Frame(strip, bg=C["field"])
+            row.pack()
+            MuteButton(row, var, lambda sid=src.id, v=var: self._on_mute(sid, v.get()), surface=C["field"],
+                       scale=self.k).pack(side="left")
+            if src.id not in GLOBAL_AUDIO:
+                x = tk.Label(row, text="✕", bg=C["field"], fg=C["muted"], cursor="hand2", font=(FONT, 9))
+                x.pack(side="left", padx=(8, 0))
+                x.bind("<Button-1>", lambda _e, sid=src.id: self._remove_audio(sid))
+            self.strips[src.id] = {"level": level, "fader": fader}
+        if not audios:
+            self._label(self.mixer_row, "No audio yet. Choose Desktop Audio and Mic/Aux in Settings > Audio,\n"
+                        "or add an Audio input.", fg=C["muted"], justify="left").pack(side="left", anchor="n")
+        RoundButton(self.mixer_row, "+ Audio input", lambda: self._add_source("audio"), surface=C["surface"],
+                    bg=C["field"], fg=C["text"], height=26, width=100, radius=6, font=(FONT, 9, "bold"),
+                    scale=self.k).pack(side="left", anchor="n", padx=(4, 0))
+
+    # ---- Controls dock
+    def _build_controls(self, body) -> None:
+        def big(text, command):
+            button = RoundButton(body, text, command, surface=C["surface"], bg=C["field"], fg=C["text"], height=28,
+                                 width=190, radius=7, font=(FONT, 9, "bold"), scale=self.k)
+            button.pack(fill="x", pady=1)
+            return button
+        self.live_btn = big("Start Streaming", self._toggle_live)
+        self.rec_btn = big("Start Recording", self._toggle_record)
+        self.vcam_btn = big("Start Virtual Camera", self._toggle_vcam)
+        self.studio_btn = big("Studio Mode", self._toggle_studio)
+        big("Manage Broadcast", self._manage_broadcast)
+        big("Settings", self._open_settings)
+        big("Exit", self._exit)
+
+    # ---- Recent recordings dock
+    def _build_recent(self, body) -> None:
+        bar = tk.Frame(body, bg=C["surface"])
+        bar.pack(side="bottom", fill="x", pady=(6, 0))
+        self.recent_list = self._listbox(body, height=5)
+        self.recent_list.bind("<Double-Button-1>", lambda _e: self._open_recent())
+        for text, command in (("Open", self._open_recent), ("Folder", self._open_folder)):
+            RoundButton(bar, text, command, surface=C["surface"], bg=C["field"], fg=C["text"], height=26, width=70,
+                        radius=6, font=(FONT, 9, "bold"), scale=self.k).pack(side="left", padx=(0, 4))
+
+    # ----------------------------------------------------------- refreshing
+    def _refresh_all(self) -> None:
+        if self.preview_name not in [s.name for s in self.project.scenes]:
+            self.preview_name = self.project.current
+        self._refresh_scenes()
+        self._refresh_sources()
+        self._rebuild_mixer()
+        self._refresh_recent()
+        self._refresh_preview_button()
+        self._draw_layout_preview()
+
+    def _refresh_scenes(self) -> None:
+        self.scene_list.delete(0, "end")
+        for scene in self.project.scenes:
+            live = self.studio and scene.name == self.project.current
+            self.scene_list.insert("end", ("▶  " if live else "") + scene.name)
+        self.scene_list.selection_clear(0, "end")
+        self.scene_list.selection_set([s.name for s in self.project.scenes].index(self.edit_name))
+
+    def _items_front_first(self):
+        return list(reversed(list(enumerate(self._edit_scene().items))))
+
+    def _refresh_sources(self, keep=None) -> None:
+        self.source_list.delete(0, "end")
+        for _ii, item in self._items_front_first():
+            src = self.project.sources[item.source]
+            self.source_list.insert("end", f"{'◉' if item.visible else '○'}   {src.name}")
+        if keep is not None and self.source_list.size() > 0:
+            self.source_list.selection_set(min(keep, self.source_list.size() - 1))
+        self._update_selected_label()
+
+    def _selected_item(self):
+        sel = self.source_list.curselection()
+        order = self._items_front_first()
+        return order[sel[0]][0] if sel and sel[0] < len(order) else None
+
+    def _update_selected_label(self) -> None:
+        index = self._selected_item()
+        if index is None:
+            self.selected_label.configure(text="No source selected")
         else:
-            s.preview_wanted = wanted
+            src = self.project.sources[self._edit_scene().items[index].source]
+            self.selected_label.configure(text=src.name)
+
+    def _refresh_recent(self) -> None:
+        self.recent_list.delete(0, "end")
+        files = [p for p in self.settings.recent if os.path.exists(p)]
+        for p in files:
+            self.recent_list.insert("end", Path(p).name)
+        if not files:
+            self.recent_list.insert("end", "Nothing recorded yet.")
+        self._recent_files = files
+
+    def _refresh_preview_button(self) -> None:
+        self.preview_btn.style(text="Live preview: on" if self.settings.live_preview else "Live preview: off",
+                               bg=C["accent"] if self.settings.live_preview else C["field"])
+
+    # ------------------------------------------------------------ docks / view
+    def _load_docks(self) -> DockLayout:
+        try:
+            return DockLayout.from_dict(json.loads(self.dock_file.read_text(encoding="utf-8")))
+        except Exception:
+            return DockLayout()
+
+    def _docks_changed(self) -> None:
+        try:
+            self.dock_file.write_text(json.dumps(self.layout.to_dict(), indent=2), encoding="utf-8")
+        except OSError:
+            log.exception("could not save the dock layout")
+
+    def _toggle_lock(self) -> None:
+        self.host.set_locked(not self.layout.locked)
+        self.note = "Docks are locked." if self.layout.locked else "Docks can be dragged by their title bar."
+
+    def _toggle_on_top(self) -> None:
+        self.settings.always_on_top = not self.settings.always_on_top
+        self.root.attributes("-topmost", self.settings.always_on_top)
+        self._save()
+
+    def _toggle_live_preview(self) -> None:
+        if self.session is None:
+            return
+        self.settings.live_preview = not self.settings.live_preview
+        wanted = self.settings.live_preview
+        self._refresh_preview_button()
+        self._save()
+        if wanted and not self.session.running:
+            self._bg("Starting the preview...", lambda: self.session.set_preview(True), self._started)
+        elif not wanted and self.session.preview_wanted:
+            self._bg("", lambda: self.session.set_preview(False), self._started)
+        else:
+            self.session.preview_wanted = wanted
 
     def _draw_preview(self) -> None:
+        """Show the real picture where there is one (the engine is running), else the layout sketch."""
         s = self.session
-        if s is None or not self.settings.compact:
+        path = s.preview_path() if s is not None else None
+        self.edit_pane.update_live(path)
+        if self.studio:
+            self.program_pane.update_live(path)
+
+    # --------------------------------------------------------- scenes
+    def _on_scene_select(self) -> None:
+        sel = self.scene_list.curselection()
+        if not sel or sel[0] >= len(self.project.scenes):
             return
-        path = s.preview_path()
-        canvas = self.preview
-        try:
-            if path is not None and path.exists() and path.stat().st_mtime != self.preview_mtime:
-                self.preview_mtime = path.stat().st_mtime
-                if self.preview_photo is None:
-                    self.preview_photo = tk.PhotoImage()
-                    canvas.delete("all")
-                    canvas.create_image(self.px(240), self.px(135), image=self.preview_photo)
-                self.preview_photo.configure(file=str(path))       # reuse one image: no memory churn
-            elif path is None and self.preview_photo is not None:
-                self.preview_photo = None
-                self.preview_mtime = 0.0
-                canvas.delete("all")
-                canvas.create_text(self.px(240), self.px(135), text="Preview is starting...", fill=MUTED)
-        except (tk.TclError, OSError):
-            pass                                  # the picture was being replaced; try again next time
+        name = self.project.scenes[sel[0]].name
+        if self.studio:                                   # in Studio Mode a click chooses what to edit (Preview)
+            if name != self.preview_name:
+                self.preview_name = name
+                self._refresh_sources()
+                self._draw_layout_preview()
+        elif name != self.project.current:
+            self._select_scene(name)
 
-    # --------------------------------------------------------- reading choices
-    def _collect(self) -> Settings:
-        s = self.settings
-        s.screen = self.v_screen.get()
-        window = self.v_window.get()
-        s.window = "" if window in ("", ENTIRE_SCREEN) else window
-        s.fps = int(self.v_fps.get())
-        s.duration_min = int(self.v_duration.get()) if self.v_duration.get().strip().isdigit() else 0
-        s.folder = self.v_folder.get().strip() or s.folder
-        s.prefix = self.v_prefix.get().strip() or "JernCast"
-        s.stream_service = self.v_service.get()
-        s.stream_server = self.v_server.get().strip()
-        s.stream_key = self.v_key.get().strip()
-        s.mic = "" if self.v_mic.get() == NONE else self.v_mic.get()
-        s.mic_on = self.v_mic_on.get()
-        s.desktop = "" if self.v_desktop.get() == NONE else (
-            "loopback" if self.v_desktop.get() == SYSTEM_SOUND else self.v_desktop.get())
-        s.desktop_on = self.v_desktop_on.get()
-        s.webcam = "" if self.v_webcam.get() == NONE else self.v_webcam.get()
-        s.cam_corner = self.v_corner.get()
-        s.encoder = self.v_encoder.get()
-        s.canvas = OUTPUT_SIZES.get(self.v_output.get(), "1280x720")
-        s.quality = self.v_quality.get()
-        s.kbps = int(self.v_kbps.get()) if self.v_kbps.get().strip().isdigit() else 4500
-        s.show_cursor = self.v_cursor.get()
-        s.mp4 = self.v_mp4.get()
-        s.remember_key = self.v_remember.get()
-        number = int(self.v_layout_num.get())
-        s.layout = number if number in available_layouts(s) else 1
-        return s
-
-    def _choices_changed(self) -> None:
-        """Something changed: save it, and rebuild the sources if nothing is capturing."""
-        s = self._collect()
-        s.save()
-        sess = self.session
-        capturing = sess is not None and (sess.recording or sess.streaming)
-        if not capturing:
-            self.project = project_from_settings(s)
-            if sess is not None:
-                sess.project = self.project
-                if sess.running:                      # only the preview is running: restart it with the new choices
-                    wanted = s.compact
-                    self._bg("", lambda: (sess.set_preview(False), wanted and sess.set_preview(True)),
-                             self._started)
-        else:
-            self.note = "Saved. Source, quality and size changes apply the next time you start."
-        self._refresh_layout_choices()
-        self._update_info()
-
-    def _refresh_layout_choices(self) -> None:
-        numbers = available_layouts(self.settings)
-        for bar in (self.layout_bar, self.compact_layout):
-            bar.set_options(numbers)
-        if self.settings.layout not in numbers:
-            self.settings.layout = 1
-        self.v_layout_num.set(self.settings.layout)
-        self.layout_caption.set(LAYOUT_NAMES[self.settings.layout])
-
-    def _update_info(self) -> None:
-        s = self.settings
-        place = s.window or (s.screen.split(" - ")[0] if s.screen else "Primary screen")
-        encoder = "Auto encoder" if s.encoder == "auto" else s.encoder
-        self.base_info = f"{place}  →  {s.canvas.replace('x', '×')}  ·  {s.fps} fps  ·  {encoder}"
-        self.info.set(self.note or self.base_info)
-
-    def _update_key_hint(self) -> None:
-        if self.v_key.get().strip():
-            self.key_hint.set("Ready to go live")
-            self.key_label.configure(style="Ok.TLabel")
-        else:
-            self.key_hint.set("Add your stream key to go live")
-            self.key_label.configure(style="Warn.TLabel")
-
-    def _show_key(self) -> None:
-        self.show_key = not self.show_key
-        self.entry_key.configure(show="" if self.show_key else "*")
-        self.key_toggle.configure(text="Hide" if self.show_key else "Show")
-
-    def entry_server_row_update(self) -> None:
-        """The server box is only shown for a custom service."""
-        if self.settings.stream_service == "Custom":
-            self.server_label.grid()
-            self.entry_server.grid()
-        else:
-            self.server_label.grid_remove()
-            self.entry_server.grid_remove()
-
-    def _service_changed(self) -> None:
-        service = self.v_service.get()
-        if SERVICES.get(service):
-            self.v_server.set(SERVICES[service])
-        self.settings.stream_service = service
-        self.entry_server_row_update()
-        self._choices_changed()
-
-    def _refresh_windows(self) -> None:
-        self.windows = list_windows()
-        self.cb_window.configure(values=[ENTIRE_SCREEN] + self.windows)
-
-    def _browse(self) -> None:
-        chosen = filedialog.askdirectory(initialdir=self.v_folder.get() or str(Path.home()))
-        if chosen:
-            self.v_folder.set(chosen)
-            self._choices_changed()
-
-    # ----------------------------------------------------- live changes
-    def _layout_picked(self) -> None:
-        self._set_layout(int(self.v_layout_num.get()))
-
-    def _set_layout(self, number: int) -> None:
-        if number not in available_layouts(self.settings):
-            self.note = "Choose a webcam first to use the webcam layouts."
-            return
-        self.settings.layout = number
-        self.v_layout_num.set(number)
-        self.layout_caption.set(LAYOUT_NAMES[number])
-        name = layout_scene_name(number)
+    def _select_scene(self, name: str) -> None:
         if self.session is not None:
-            try:
-                self.session.switch_scene(name)
-            except KeyError:
-                self.project.current = name
-        self.settings.save()
-
-    def _toggle_webcam(self) -> None:
-        if not self.settings.webcam:
-            self.note = "Choose a webcam first (Webcam and layout card)."
-            return
-        self._set_layout(1 if self.settings.layout != 1 else 2)
-
-    def _volume(self, which: str, value) -> None:
-        if which == "mic":
-            self.settings.mic_volume = int(float(value))
+            self.session.switch_scene(name)               # live: also changes what is recorded / streamed
         else:
-            self.settings.desktop_volume = int(float(value))
-        if self.session is not None and which in self.project.sources:
-            self.session.set_volume(which, float(value) / 100.0)
+            self.project.current = name
+        self._refresh_scenes()
+        self._refresh_sources()
+        self._draw_layout_preview()
+        self.dirty = True
 
-    def _audio_on(self, which: str) -> None:
-        on = (self.v_mic_on if which == "mic" else self.v_desktop_on).get()
-        s = self.session
-        if s is not None and s.running:
-            if s.engine is not None and which in s.engine.plan.meter_files:
-                s.set_muted(which, not on)               # live: silence it, or bring it back
-                setattr(self.settings, "mic_on" if which == "mic" else "desktop_on", on)
-                self.settings.save()
-                return
-            self.note = "That input was off when you started. It will be on the next time you start."
-        self._choices_changed()
+    def _select_scene_number(self, number: int) -> None:
+        if 1 <= number <= len(self.project.scenes):
+            name = self.project.scenes[number - 1].name
+            if self.studio:
+                self.preview_name = name
+                self._refresh_scenes()
+                self._refresh_sources()
+                self._draw_layout_preview()
+            else:
+                self._select_scene(name)
 
-    def _cam_size(self, value) -> None:
-        self.settings.cam_size = int(float(value))
-        if not (self.session and (self.session.recording or self.session.streaming)):
-            self.project = project_from_settings(self.settings)
-            if self.session is not None:
-                self.session.project = self.project
-        self.settings.save()
-
-    def _hotkeys_changed(self) -> None:
-        if self.v_hk_rec.get() == self.v_hk_live.get():
-            self.note = "Pick two different hotkeys."
+    def _add_scene(self) -> None:
+        if not self._can_edit():
             return
-        self._choices_changed()
+        name = simpledialog.askstring("New scene", "Scene name:", parent=self.root)
+        if name:
+            scene = self.project.add_scene(name)
+            self.project.current = scene.name
+            self._refresh_all()
+            self._save()
+
+    def _rename_scene(self) -> None:
+        name = simpledialog.askstring("Rename scene", "New name:", initialvalue=self.edit_name, parent=self.root)
+        if name:
+            was_preview = self.edit_name == self.preview_name
+            new = self.project.rename_scene(self.edit_name, name)
+            if was_preview:
+                self.preview_name = new
+            self._refresh_scenes()
+            self._save()
+
+    def _remove_scene(self) -> None:
+        if not self._can_edit():
+            return
+        if len(self.project.scenes) <= 1:
+            messagebox.showinfo("JernCast", "You need at least one scene.")
+            return
+        if messagebox.askyesno("Remove scene", f"Remove the scene \"{self.edit_name}\"?"):
+            self.project.remove_scene(self.edit_name)
+            self._refresh_all()
+            self._save()
+
+    def _move_scene(self, delta: int) -> None:
+        if not self._can_edit():
+            return
+        self.project.move_scene(self.edit_name, delta)
+        self._refresh_scenes()
+        self._save()
+
+    # --------------------------------------------------------- sources
+    def _can_edit(self) -> bool:
+        if self.session is not None and (self.session.recording or self.session.streaming):
+            messagebox.showinfo("JernCast", "Stop recording and streaming first to add, remove or move scenes "
+                                "and sources. (Switching scenes, showing or hiding sources, volume and mute "
+                                "work live.)")
+            return False
+        return True
+
+    def _restart_idle_engine(self) -> None:
+        """Only the preview is running: restart it so it sees the changed sources."""
+        s = self.session
+        if s is not None and s.running and not (s.recording or s.streaming):
+            wanted = self.settings.live_preview
+            self._bg("", lambda: (s.set_preview(False), wanted and s.set_preview(True)), self._started)
+
+    def _add_source(self, kind: str) -> None:
+        if not self._can_edit():
+            return
+        result = SourceDialog(self, kind).show()
+        if result is None:
+            return
+        src = self.project.add_source(kind, result["name"], result["device"])
+        if kind == "audio":
+            self._rebuild_mixer()
+        else:
+            self.project.add_item(self.edit_name, src.id, layout=result["layout"],
+                                  corner=result["corner"], size=result["size"])
+            self._refresh_sources(keep=0)
+            self._draw_layout_preview()
+        self._save()
+        self._restart_idle_engine()
+
+    def _properties(self) -> None:
+        index = self._selected_item()
+        if index is None:
+            return
+        if not self._can_edit():
+            return
+        item = self._edit_scene().items[index]
+        src = self.project.sources[item.source]
+        result = SourceDialog(self, src.kind, src, item).show()
+        if result is None:
+            return
+        src.name, src.device = result["name"].strip() or src.name, result["device"]
+        item.layout, item.corner, item.size = result["layout"], result["corner"], result["size"]
+        self._refresh_sources(keep=len(self._edit_scene().items) - 1 - index)
+        self._draw_layout_preview()
+        self._save()
+        self._restart_idle_engine()
+
+    def _remove_source(self) -> None:
+        index = self._selected_item()
+        if index is None or not self._can_edit():
+            return
+        self.project.remove_item(self.edit_name, index)
+        self._refresh_sources(keep=0)
+        self._draw_layout_preview()
+        self._save()
+        self._restart_idle_engine()
+
+    def _source_clicked(self, event) -> None:
+        """Clicking the dot at the left of a source shows or hides it (works live)."""
+        self._update_selected_label()
+        if event.x < self.px(30):
+            self._toggle_visible()
+
+    def _toggle_visible(self) -> None:
+        index = self._selected_item()
+        if index is None:
+            return
+        item = self._edit_scene().items[index]
+        position = self.source_list.curselection()[0]
+        if self.session is not None:
+            self.session.set_visible(self.edit_name, index, not item.visible)
+        else:
+            item.visible = not item.visible
+        self._refresh_sources(keep=position)
+        self._draw_layout_preview()
+        self.dirty = True
+
+    def _move_source(self, delta: int) -> None:
+        index = self._selected_item()
+        if index is None or not self._can_edit():
+            return
+        new = self.project.move_item(self.edit_name, index, delta)
+        self._refresh_sources(keep=len(self._edit_scene().items) - 1 - new)
+        self._draw_layout_preview()
+        self._save()
+
+    # ----------------------------------------------------------- audio
+    def _on_volume(self, source_id: str, value) -> None:
+        if self.session is not None:
+            self.session.set_volume(source_id, float(value) / 100.0)
+        self.dirty = True
+
+    def _on_mute(self, source_id: str, muted: bool) -> None:
+        if self.session is not None:
+            self.session.set_muted(source_id, muted)
+        self.dirty = True
+
+    def _remove_audio(self, source_id: str) -> None:
+        if not self._can_edit():
+            return
+        self.project.remove_audio(source_id)
+        self._rebuild_mixer()
+        self._save()
+        self._restart_idle_engine()
+
+    # ---------------------------------------------------- settings, profiles
+    def _open_settings(self) -> None:
+        capturing = self.session is not None and (self.session.recording or self.session.streaming)
+        if SettingsDialog(self).show():
+            if not capturing:
+                sync_global_audio(self.project, self.settings)
+            self._save()
+            self._rebuild_mixer()
+            self._set_hotkeys()
+            self.note = "Saved. Most changes apply the next time you start." if capturing else "Settings saved."
+            self._restart_idle_engine()
+
+    def _save(self) -> None:
+        self.settings.save(self.profiles.path(self.profiles.current))
+        self.project.save(self.collections.path(self.collections.current))
+        self.dirty = False
+
+    def _guard_idle(self) -> bool:
+        if self.session is not None and self.session.running:
+            messagebox.showinfo("JernCast", "Stop recording, streaming and the live preview first.")
+            return False
+        return True
+
+    def _after_profile_change(self) -> None:
+        if self.session is not None:
+            self.session.settings = self.settings
+        sync_global_audio(self.project, self.settings)
         self._set_hotkeys()
+        self.root.attributes("-topmost", bool(self.settings.always_on_top))
+        self._refresh_all()
+
+    def _switch_profile(self, name: str) -> None:
+        if not self._guard_idle() or name == self.profiles.current:
+            return
+        self._save()
+        self.profiles.set_current(name)
+        self.settings = Settings.load(self.profiles.path(name))
+        self._after_profile_change()
+        self._save()
+        self.note = f"Profile: {name}"
+
+    def _switch_collection(self, name: str) -> None:
+        if not self._guard_idle() or name == self.collections.current:
+            return
+        self._save()
+        self.collections.set_current(name)
+        self.project = Project.load(self.collections.path(name))
+        sync_global_audio(self.project, self.settings)
+        if self.session is not None:
+            self.session.project = self.project
+        self._refresh_all()
+        self._save()
+        self.note = f"Scene collection: {name}"
+
+    def _store_new(self, store: NamedStore, is_profile: bool) -> None:
+        if not self._guard_idle():
+            return
+        name = simpledialog.askstring("New", "Name:", parent=self.root)
+        if not name:
+            return
+        self._save()
+        made = store.create(name, copy_from=store.current if is_profile else None)
+        if not is_profile:                                   # a new collection starts with one empty scene
+            Project.default().save(store.path(made))
+        (self._switch_profile if is_profile else self._switch_collection)(made)
+
+    def _store_rename(self, store: NamedStore) -> None:
+        name = simpledialog.askstring("Rename", "New name:", initialvalue=store.current, parent=self.root)
+        if name:
+            self._save()
+            store.rename(store.current, name)
+
+    def _store_remove(self, store: NamedStore) -> None:
+        if len(store.names()) <= 1:
+            messagebox.showinfo("JernCast", "You need at least one.")
+            return
+        if not self._guard_idle():
+            return
+        if messagebox.askyesno("Remove", f"Remove \"{store.current}\"?"):
+            store.delete(store.current)
+            if store is self.profiles:
+                self.settings = Settings.load(store.path(store.current))
+                self._after_profile_change()
+            else:
+                self.project = Project.load(store.path(store.current))
+                sync_global_audio(self.project, self.settings)
+                if self.session is not None:
+                    self.session.project = self.project
+                self._refresh_all()
 
     # --------------------------------------------------------- background work
     def _probe(self) -> None:
         cams, mics = list_devices(self.ffmpeg)
         encoders = cached_working_encoders(self.ffmpeg)
         self.events.put(("devices", cams, mics, encoders))
-
-    def _apply_devices(self, cams, mics, encoders) -> None:
-        self.webcams, self.mics, self.encoders = cams, mics, encoders
-        if self.session is not None:
-            self.session.encoders[:] = encoders
-        self.cb_webcam.configure(values=[NONE] + cams)
-        self.cb_mic.configure(values=[NONE] + mics)
-        self.cb_desktop.configure(values=[SYSTEM_SOUND, NONE] + mics)
-        self.cb_encoder.configure(values=["auto"] + encoders)
-        if not self.settings.mic and mics:
-            self.v_mic.set(pick_microphone(mics))
-        self._choices_changed()
 
     def _bg(self, label: str, work, done=None) -> None:
         """Run `work()` off the window thread, then call done(result, error) back on it."""
@@ -653,7 +901,7 @@ class App:
         threading.Thread(target=run, daemon=True).start()
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
-        for button in (self.rec_btn, self.live_btn):
+        for button in (self.rec_btn, self.live_btn, self.vcam_btn):
             button.state(["!disabled"] if enabled else ["disabled"])
 
     def _tick(self) -> None:
@@ -662,13 +910,17 @@ class App:
                 event = self.events.get_nowait()
                 kind = event[0]
                 if kind == "devices":
-                    self._apply_devices(*event[1:])
+                    self.webcams, self.mics, self.encoders = event[1], event[2], event[3]
+                    if self.session is not None:
+                        self.session.encoders[:] = self.encoders
                 elif kind == "record":
                     self._toggle_record()
                 elif kind == "stream":
                     self._toggle_live()
-                elif kind == "layout":
-                    self._set_layout(event[1])
+                elif kind == "scene":
+                    self._select_scene_number(event[1])
+                elif kind == "transition":
+                    self._transition()
                 elif kind == "done":
                     self._finish_bg(*event[1:])
         except queue.Empty:
@@ -681,11 +933,16 @@ class App:
                 self._draw_meters(self.session.meters())
                 if self._ticks % 3 == 0:
                     self._draw_preview()
+            elif self.live_image_shown:
+                self._draw_preview()
             if self._ticks % (10 if active else 2) == 0:
                 for message in self.session.poll():
                     messagebox.showwarning("JernCast", message[:1500])
                 self._update_buttons()
                 self._check_duration()
+                self._update_stats()
+                if self.dirty:
+                    self._save()
             self._update_status()
         # wake up often only while something is running: an idle JernCast uses almost no CPU
         self.root.after(100 if active else 500, self._tick)
@@ -701,43 +958,50 @@ class App:
         self._update_buttons()
 
     def _check_duration(self) -> None:
-        s = self.session
-        limit = self.settings.duration_min * 60
-        if s.recording and limit and s.record_seconds() >= limit and not self.auto_stopped and not self.busy:
-            self.auto_stopped = True
+        s, limit = self.session, self.settings.duration_min * 60
+        if s.recording and limit and s.record_seconds() >= limit and not getattr(self, "_auto_stopped", False) \
+                and not self.busy:
+            self._auto_stopped = True
             self._toggle_record()
 
     def _update_buttons(self) -> None:
         s = self.session
-        if s.recording:
-            self.rec_btn.style(text="■  Stop Recording", bg="#7a2a30")
-        else:
-            self.rec_btn.style(text="●  Start Recording", bg=REC)
-        if s.streaming:
-            self.live_btn.style(text="Stop Live", bg=ACCENT, outline=None)
-        else:
-            self.live_btn.style(text="Go live", bg=FIELD, outline=BORDER)
+        self.rec_btn.style(text="Stop Recording" if s.recording else "Start Recording",
+                           bg="#7a2a30" if s.recording else C["field"])
+        self.live_btn.style(text="Stop Streaming" if s.streaming else "Start Streaming",
+                            bg=C["accent"] if s.streaming else C["field"])
+        self.vcam_btn.style(text="Stop Virtual Camera" if s.vcam_running else "Start Virtual Camera",
+                            bg=C["accent"] if s.vcam_running else C["field"])
+        self.studio_btn.style(text="Studio Mode: on" if self.studio else "Studio Mode",
+                              bg=C["accent"] if self.studio else C["field"])
 
     def _update_status(self) -> None:
         s = self.session
         if s.streaming and s.recording:
-            text, color = f"LIVE + REC  {format_time(s.stream_seconds())}", REC
+            text, color = f"LIVE + REC  {format_time(s.stream_seconds())}", C["rec"]
         elif s.streaming:
-            text, color = f"LIVE  {format_time(s.stream_seconds())}", REC
+            text, color = f"LIVE  {format_time(s.stream_seconds())}", C["rec"]
         elif s.recording:
-            text, color = f"REC  {format_time(s.record_seconds())}", REC
+            text, color = f"REC  {format_time(s.record_seconds())}", C["rec"]
+        elif s.vcam_running:
+            text, color = "CAMERA ON", C["accent"]
         else:
-            text, color = "Ready", OK
-        self.info.set(self.note or self.base_info)
+            text, color = "Ready", C["ok"]
         self.pill.set(text, color)
+        self.note_label.configure(text=self.note or ("Virtual camera is on." if s.vcam_running else ""))
+
+    def _update_stats(self) -> None:
+        s = self.session
+        pids = [os.getpid()] + s.pids()
+        self.stats.configure(text=f"CPU {self.cpu.percent():.1f}%     RAM {process_memory_mb(pids):.0f} MB     "
+                                  f"{self.settings.fps} fps")
 
     def _draw_meters(self, levels: dict) -> None:
-        for sid, bars in self.meters.items():
+        for sid, parts in self.strips.items():
             frac = max(0.0, min(1.0, (levels.get(sid, -100.0) + 60.0) / 60.0))
-            frac = max(frac, self.peaks.get(sid, 0.0) - 0.05)       # falls back smoothly
+            frac = max(frac, self.peaks.get(sid, 0.0) - 0.05)
             self.peaks[sid] = frac
-            for bar in bars:
-                bar.set(frac)
+            parts["level"].set(frac)
 
     # ---------------------------------------------------------------- actions
     def _toggle_record(self) -> None:
@@ -753,9 +1017,17 @@ class App:
                     messagebox.showerror("JernCast", str(error)[:1500])
             self._bg("Saving...", s.stop_recording, done)
         else:
-            self._choices_changed()
-            self.auto_stopped = False
+            self._auto_stopped = False
             self._bg("Starting...", s.start_recording, self._started)
+
+    def _toggle_vcam(self) -> None:
+        if self.session is None or self.busy:
+            return
+        s = self.session
+        if s.vcam_running:
+            self._bg("Stopping the virtual camera...", s.stop_vcam, self._started)
+        else:
+            self._bg("Starting the virtual camera...", s.start_vcam, self._started)
 
     def _toggle_live(self) -> None:
         if self.session is None or self.busy:
@@ -764,7 +1036,6 @@ class App:
         if s.streaming:
             self._bg("Stopping the stream...", s.stop_stream, self._started)
         else:
-            self._choices_changed()
             self._bg("Connecting to the stream...", s.start_stream, self._started)
 
     def _started(self, _result, error) -> None:
@@ -774,17 +1045,8 @@ class App:
     def _remember_recording(self, path: Path) -> None:
         recent = [str(path)] + [p for p in self.settings.recent if p != str(path)]
         self.settings.recent = recent[:8]
-        self.settings.save()
+        self._save()
         self._refresh_recent()
-
-    def _refresh_recent(self) -> None:
-        self.recent_list.delete(0, "end")
-        files = [p for p in self.settings.recent if os.path.exists(p)]
-        for p in files:
-            self.recent_list.insert("end", Path(p).name)
-        if not files:
-            self.recent_list.insert("end", "Nothing recorded yet. Press Start Recording.")
-        self._recent_files = files
 
     def _open_path(self, target: Path) -> None:
         try:
@@ -818,14 +1080,20 @@ class App:
             webbrowser.open(url)
         else:
             messagebox.showinfo("JernCast", "Manage Broadcast opens your streaming service's control page. "
-                                "It knows YouTube and Twitch; pick one under Stream.")
+                                "It knows YouTube and Twitch; choose one in Settings > Stream.")
+
+    def _about(self) -> None:
+        messagebox.showinfo("About JernCast", f"JernCast {__version__}\n\nA simple screen recorder and live "
+                            "streamer for Windows.\nMIT licensed. Recording and streaming are done by FFmpeg.\n"
+                            "JernCast is its own program and is not affiliated with OBS Studio.")
 
     def _set_hotkeys(self) -> None:
         for hotkey in self.hotkeys:
             hotkey.stop()
         self.hotkeys = []
         wanted = [(self.settings.hotkey_record, ("record",)), (self.settings.hotkey_stream, ("stream",))]
-        wanted += [(f"Ctrl+Alt+{n}", ("layout", n)) for n in (1, 2, 3, 4)]
+        wanted += [(f"Ctrl+Alt+{n}", ("scene", n)) for n in range(1, 10)]
+        wanted.append(("Ctrl+Alt+0", ("transition",)))             # Studio Mode: send Preview live
         problems = []
         for key, event in wanted:
             hotkey = Hotkey(key, lambda e=event: self.events.put(e))
@@ -833,7 +1101,7 @@ class App:
                 problems.append(key)
             self.hotkeys.append(hotkey)
         if problems:
-            self.note = f"{', '.join(problems)} is used by another program; pick another key."
+            self.note = f"{', '.join(problems)} is used by another program."
 
     def _exit(self) -> None:
         if self.busy:
@@ -853,6 +1121,8 @@ class App:
             except Exception:
                 log.exception("shutdown failed")
         try:
-            self._collect().save()
+            self.settings.studio_mode = self.studio
+            self._save()
+            self._docks_changed()
         finally:
             self.root.destroy()

@@ -1,12 +1,14 @@
 ; Inno Setup script. Build with: scripts\build-windows.ps1 -Installer
 #define AppName "JernCast"
-#define AppVersion "0.0.2"
+#define AppVersion "0.0.3"
 
 [Setup]
 AppId={{6E0C3F52-4B1D-4C8A-9D27-5A1F0E7B9C41}
 AppName={#AppName}
-AppVersion={#AppVersion}
-AppPublisher=JernCast
+; No AppVersion line: Windows then shows no version in Settings > Installed apps.
+; (The version is still used in the installer's file name through the AppVersion define above.)
+AppVerName={#AppName}
+AppPublisher=Amin-Brail
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 UninstallDisplayIcon={app}\JernCast.exe

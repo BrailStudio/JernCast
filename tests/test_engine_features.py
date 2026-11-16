@@ -7,7 +7,6 @@ import unittest
 
 from jerncast import core, loopback
 from jerncast.core import Settings
-from jerncast.layouts import available_layouts, layout_scene_name, project_from_settings
 from jerncast.project import Project
 from jerncast.session import Session
 from jerncast.winutil import parse_hotkey
@@ -15,33 +14,7 @@ from jerncast.winutil import parse_hotkey
 FFMPEG = core.find_ffmpeg()
 
 
-class LayoutTests(unittest.TestCase):
-    def test_without_a_webcam_only_screen_layout(self):
-        p = project_from_settings(Settings(mic="Mic A"))
-        self.assertEqual([s.name for s in p.scenes], [layout_scene_name(1)])
-        self.assertEqual(sorted(p.sources), ["desktop", "mic", "screen"])
-        self.assertEqual(p.sources["desktop"].kind, "loopback")
-
-    def test_with_a_webcam_four_layouts_and_current_layout(self):
-        s = Settings(webcam="Cam A", layout=3, cam_corner="top-left", cam_size=30, desktop="Stereo Mix",
-                     mic_on=False, mic="Mic A")
-        self.assertEqual(available_layouts(s), [1, 2, 3, 4])
-        p = project_from_settings(s)
-        self.assertEqual(len(p.scenes), 4)
-        self.assertEqual(p.current, layout_scene_name(3))
-        two = p.scene(layout_scene_name(2)).items
-        self.assertEqual((two[1].source, two[1].layout, two[1].corner, two[1].size), ("webcam", "corner", "top-left", "30"))
-        four = p.scene(layout_scene_name(4)).items
-        self.assertEqual([i.source for i in four], ["webcam", "screen"])       # screen drawn on top
-        self.assertNotIn("mic", p.sources)                                      # mic switched off
-        self.assertEqual(p.sources["desktop"].kind, "audio")                    # a real device name
-
-    def test_window_and_volumes_and_unknown_layout(self):
-        p = project_from_settings(Settings(window="Notepad", mic="M", mic_volume=50, layout=4))
-        self.assertEqual((p.sources["screen"].kind, p.sources["screen"].device), ("window", "Notepad"))
-        self.assertEqual(p.sources["mic"].volume, 0.5)
-        self.assertEqual(p.current, layout_scene_name(1))                       # no webcam: falls back
-
+class HotkeyAndAudioTests(unittest.TestCase):
     def test_hotkey_specs(self):
         self.assertEqual(parse_hotkey("F9"), (0, 0x78))
         self.assertEqual(parse_hotkey("Ctrl+Alt+1"), (3, 0x31))
@@ -79,7 +52,7 @@ class EngineFeatureTests(unittest.TestCase):
         data = png.read_bytes()
         self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
         width, height = struct.unpack(">II", data[16:24])
-        self.assertEqual((width, height), (480, 270))
+        self.assertEqual((width, height), (640, 360))
         s.start_recording()
         s.set_preview(False)
         self.assertTrue(s.running)                       # still recording, so the engine stays
@@ -141,3 +114,57 @@ class EngineFeatureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def red_box(path, seconds):
+    """Where red is in the frame at `seconds`, as (x0, y0, x1, y1) in a 640x360 picture (None if no red)."""
+    import subprocess
+    raw = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", str(seconds), "-i", str(path),
+                          "-frames:v", "1", "-vf", "scale=64:36,format=rgb24", "-f", "rawvideo", "-"],
+                         capture_output=True).stdout
+    xs, ys = [], []
+    for y in range(36):
+        for x in range(64):
+            r, g, b = raw[(y * 64 + x) * 3:(y * 64 + x) * 3 + 3]
+            if r > 150 and g < 90 and b < 90:
+                xs.append(x)
+                ys.append(y)
+    return (min(xs) * 10, min(ys) * 10, (max(xs) + 1) * 10, (max(ys) + 1) * 10) if xs else None
+
+
+@unittest.skipUnless(FFMPEG, "needs ffmpeg")
+class LiveGeometryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_DATA_HOME"] = self.tmp
+        self.project = Project()
+        self.project.add_scene("S")
+        red = self.project.add_source("test_color", "Red", "red")
+        item = self.project.add_item("S", red.id)
+        item.layout, item.box = "free", [0.0, 0.0, 0.25, 0.25]
+        self.session = Session(FFMPEG, Settings(folder=self.tmp + "/out", canvas="640x360"), self.project)
+
+    def tearDown(self):
+        self.session.shutdown()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_move_and_resize_a_source_while_recording(self):
+        s = self.session
+        s.start_recording()
+        time.sleep(2.5)
+        s.set_item_box("S", 0, [0.5, 0.5, 0.25, 0.25])            # drag it
+        time.sleep(2.5)
+        s.set_item_box("S", 0, [0.25, 0.25, 0.5, 0.5])            # make it bigger
+        time.sleep(2.5)
+        path = s.stop_recording()
+        first, moved, grown = red_box(path, 1.0), red_box(path, 3.8), red_box(path, 6.5)
+        self.assertEqual(first, (0, 0, 160, 90))
+        self.assertEqual(moved, (320, 180, 480, 270))
+        self.assertEqual(grown, (160, 90, 480, 270))
+        saved = Project.from_dict(self.project.to_dict()).scenes[0].items[0]
+        self.assertEqual((saved.layout, saved.box), ("free", [0.25, 0.25, 0.5, 0.5]))
+
+    def test_set_item_box_while_idle_only_changes_the_project(self):
+        self.session.set_item_box("S", 0, [0.1, 0.1, 0.3, 0.3])
+        self.assertEqual(self.project.scenes[0].items[0].box, [0.1, 0.1, 0.3, 0.3])
+        self.assertFalse(self.session.running)

@@ -1,35 +1,56 @@
 <p align="center"><img src="assets/jerncast-logo.png" alt="JernCast" width="220"></p>
 
-# JernCast 0.0.2
+# JernCast 0.0.3
 
-A simple screen recorder and live streamer for Windows 10/11. Pick what to capture, press
-**Start Recording** or **Go live**.
+A simple screen recorder and live streamer for Windows 10/11, with a dark, dockable, OBS-style window.
+JernCast is its own program: its code is original (MIT licensed) and it is not affiliated with OBS Studio.
 
-## What is in the window
+## The window
 
-| Card | What it does |
+A menu bar, a preview in the middle, and docks you can move:
+
+| Dock | What it does |
 | --- | --- |
-| **Capture** | Screen, or a single window. 30 or 60 fps. Stop after N minutes. Output folder and file name. |
-| **Stream** | YouTube, Twitch or a custom server, and your stream key. Tells you if the key is missing. |
-| **Recent recordings** | Your last recordings. Double-click to open. |
-| **Audio & Webcam** | Microphone and desktop sound, each with a level slider, an On switch and a live level meter. Webcam, its corner and its size. A **Layout** switch. |
-| **Advanced** | Encoder (your graphics card is used when it works), output size 480p / 720p / 1080p, quality, top bitrate, hotkeys, show cursor, MP4, whether to remember the stream key. |
+| **Scenes** | Click a scene to switch to it, even while you record or stream. **+ − ▲ ▼** add, remove and reorder. Double-click or right-click to rename. |
+| **Sources** | What is in the current scene: screen, a window, webcam, picture. Click the dot to show or hide a source live. **⚙** Properties, **▲ ▼** move forward or back. |
+| **Audio Mixer** | One strip for **Desktop Audio**, one for **Mic/Aux**, plus any audio inputs you add. Each has a live level meter, a fader (0-200%) and a mute button. All work live. |
+| **Controls** | **Start Streaming**, **Start Recording**, **Manage Broadcast** (opens YouTube's or Twitch's live control page), **Settings**, **Exit**. |
+| **Recent recordings** | Off by default; turn it on in the **Docks** menu. |
 
-Bottom: **Start Recording**, **Go live**, **Manage Broadcast** (opens YouTube's or Twitch's live control page).
-**Compact** (top right) turns the window into a small live preview with level meters and layout buttons.
+**Moving docks:** drag a dock by its title bar to the left, right or bottom of the window (empty areas show "Drop a dock here").
+**View > Lock Docks** stops them being moved, **View > Reset Docks** puts them back, the **✕** hides one, and the
+**Docks** menu brings it back. Your layout is remembered.
 
-### Four layouts, switched live
+**Menus:** File, View, Docks, **Profile** (separate sets of settings, for example "Streaming" and "Recording") and
+**Scene Collection** (separate sets of scenes and sources), Tools, Help.
 
-1. Screen only 2. Screen + webcam in a corner 3. Webcam only 4. Webcam full with the screen small
+**Dragging in the preview:** click a source in the preview and drag it to move it, drag a corner to resize it (it
+snaps to the edges and centre). This works **while you record or stream**: the change is sent to the running picture a
+few times a second. Moved sources keep their place; **Properties** can put one back in a corner.
 
-Change them from the Layout box, the **1 2 3 4** buttons in Compact view, or with **Ctrl+Alt+1 to 4**.
-This works while you are recording or live. (They need a webcam chosen; without one there is just layout 1.)
+**Studio Mode** (Controls > Studio Mode, or View menu): the window shows **Preview** (the scene you are editing, with
+drag handles) next to **Program** (what is really being recorded or streamed, live). Clicking a scene in Scenes chooses
+what to edit; **Transition** (or **Ctrl+Alt+0**) sends it live as a cut, and the old Program scene moves into Preview so
+you can go back. The Preview side is a layout sketch (boxes and names), not a second live picture.
 
-Hotkeys: **F9** start/stop recording, **F10** go live / stop (changeable under Advanced).
+**Virtual Camera** (Controls > Start Virtual Camera): other programs (Zoom, Discord, a browser) can then pick it as a
+webcam. This needs a virtual camera **driver** installed on the PC, which JernCast cannot install for you: install
+**OBS Studio** (its virtual camera is used) or **Unity Capture**, and the Python package `pyvirtualcam`
+(`pip install pyvirtualcam`, or build the installer with the *include virtual camera* option). If something is
+missing, JernCast tells you what. The picture is the same as the recording (Settings > Video sets its size), with
+about a second of delay.
 
-Streaming and recording are separate: start either first, stop either without stopping the other. If the
-internet drops, the stream ends and you are told, but the recording keeps going.
-Recordings are saved as MKV while recording (safe if the PC crashes) and become MP4 when you stop.
+**Status bar:** REC and LIVE timers, plus JernCast's CPU use and memory use (including FFmpeg) and the frame rate.
+
+The **preview** shows the real picture whenever you are recording or streaming, or when **View > Live Preview** is on
+(that keeps capturing, so it uses CPU). Otherwise it shows a layout sketch of the scene.
+
+Hotkeys (change them in Settings > Hotkeys): **F9** start/stop recording, **F10** start/stop streaming,
+**Ctrl+Alt+1 to 9** switch to scene 1 to 9.
+
+Streaming and recording are separate: start either first, stop either without stopping the other. If the internet
+drops, the stream ends and you are told, but the recording keeps going. Recordings are saved as they happen
+(safe if the PC crashes) and become MP4 when you stop.
 
 ## Get it
 
@@ -37,7 +58,7 @@ Recordings are saved as MKV while recording (safe if the PC crashes) and become 
 
 1. Make a **public** GitHub repository and upload everything in this folder.
 2. Open the **Actions** tab, choose **JernCast Windows installer**, press **Run workflow**.
-3. After about 5 to 10 minutes open the run and download **Jerncast-0.0.2-Setup** (bottom of the page, Artifacts).
+3. After about 5 to 10 minutes open the run and download **Jerncast-0.0.3-Setup** (bottom of the page, Artifacts).
 
 ### Or run it without building
 
@@ -51,54 +72,58 @@ Recordings are saved as MKV while recording (safe if the PC crashes) and become 
 scripts\build-windows.ps1 -Installer     # needs Python, and Inno Setup 6 for the installer
 ```
 
+## First steps
+
+1. Open **Settings > Audio** and choose **Desktop Audio** (System sound) and your **Mic/Aux**.
+2. In **Sources** press **+** to add a **Display capture**, **Window capture** or **Webcam**.
+3. Press **Start Recording**. Click between scenes in **Scenes** while it runs. Press it again to stop;
+   the MP4 is in `Videos\JernCast`.
+
 ## Going live on YouTube
 
 1. YouTube Studio > **Create > Go live > Stream**, copy the **Stream key**.
-2. In JernCast, **Stream** card: service **YouTube**, paste the key. Under **Advanced** use output **720p**
-   and bitrate **4500** (use **480p** and **2500** on a slow connection).
-3. Press **Go live**. JernCast tells you if YouTube cannot be reached.
+2. In JernCast open **Settings > Stream**, pick **YouTube**, paste the key. Under **Video** use **720p**
+   and under **Output** a bitrate of **4500** (use **480p** and **2500** on a slow connection).
+3. Press **Start Streaming**. JernCast tells you if YouTube cannot be reached.
 4. Press **Manage Broadcast** to open YouTube's control page and press its own **Go live** when the preview looks good.
 
-Your stream key is saved on your PC only (untick *Remember stream key* under Advanced to not save it) and is
-hidden in logs and messages. Your upload speed must be higher than the bitrate.
+Your stream key is saved on your PC only (untick *Remember the stream key* in Settings > Stream to not save it) and
+is hidden in logs and messages. Your upload speed must be higher than the bitrate.
 
 ## Using little memory
 
-JernCast is built to be light. While nothing is recording it runs no FFmpeg at all. While recording it runs one
-FFmpeg (a second only while streaming), and recordings are written straight to disk with no extra process.
-Measured here with test video (1080p screen + 720p webcam, four layouts, two audio inputs): the FFmpeg engine
-used about **125 MB** at 720p and about **85 MB** at 480p with quality *low*. The window itself adds a small amount
-on top (not measured here, because there is no Windows screen in my test setup).
+While nothing is recording JernCast runs no FFmpeg at all, and the window wakes up only twice a second. While recording
+it runs one FFmpeg (a second only while streaming) and writes the recording straight to disk. Measured with test video
+(1080p screen, 720p webcam, several scenes, two audio inputs; the virtual camera adds one more decoder process while it is on) the FFmpeg engine used about **125 MB** at 720p and about
+**85 MB** at 480p with quality *low*. The status bar shows the real figure on your PC. For the least memory and CPU:
+**480p**, quality **low**, **30 fps**, few sources, and Live Preview off.
 
-To use the least memory and CPU: **Output size 480p**, **Quality low**, **30 fps**, no webcam, and stay in the
-full view (Compact view keeps a live preview running).
+## What is not in 0.0.3
 
-## Notes and limits (version 0.0.2)
-
-- **Desktop sound** ("System sound") is captured with Windows' loopback, using the `pyaudiowpatch` package that the
-  installer includes. If it is missing, JernCast says so; then pick **Stereo Mix** (Sound settings > Recording
-  devices > Show disabled devices) or a virtual audio cable instead. This part has not been run on a real Windows PC yet.
-- **Live preview** is in Compact view. It keeps the screen being captured while you look at it, which uses CPU;
-  on a slow PC switch back to the full view when you do not need it.
-- Source, size, quality and device changes apply when you next press Start. Layout, mic/desktop level and On switches
-  work live.
-- Every source in every layout is captured while running (that is what makes switching instant).
-- No replay buffer, green screen or crop yet.
+- **Scene Transitions** (fade between scenes): scene changes are instant cuts. FFmpeg accepts only about ten live
+  commands a second, which is too few for a smooth fade, so the dock is left out rather than half-working.
+- Source filters, replay buffer, fade transitions in Studio Mode (Transition is a cut).
+- **Virtual Camera** has only been tested here with a stand-in camera. The real thing needs the driver and package
+  described above, and it has not been run on a real Windows PC.
+- **Desktop Audio** uses Windows loopback through the `pyaudiowpatch` package (included in the installer build). It has
+  not been run on a real Windows PC yet; if it fails, pick Stereo Mix or a virtual cable in Settings > Audio.
+- Changes to sources and scenes are made while stopped; switching scenes, showing or hiding sources, volume and mute
+  work live. Every source in every scene is captured while running (that is what makes switching instant).
 - Window capture records the window's size at the moment you start; protected video windows record black.
-  If a webcam will not start, close other apps using it.
-- Logs and settings: `%LOCALAPPDATA%\JernCast` (Advanced > Open logs folder).
+- Logs and settings: `%LOCALAPPDATA%\JernCast` (Tools > Open Logs Folder).
 
 ## For developers
 
-`python -m unittest discover -s tests` runs the tests with real FFmpeg and generated test sources (any OS; the
-window's tests use a stand-in for tkinter, so they check what the buttons do, not how the window looks).
+`python -m unittest discover -s tests` runs the tests with real FFmpeg and generated test sources (any OS; the window's
+tests use a stand-in for tkinter, so they check what the buttons and menus do, not how the window looks).
 
-- `core.py` settings, devices, encoders · `layouts.py` window choices to scenes · `project.py` scenes and the FFmpeg graph
-- `engine.py` the running FFmpeg and its outputs · `session.py` what the buttons call · `loopback.py` system sound
-- `gui.py` the window · `widgets.py` its hand-drawn buttons, switches and meters · `winutil.py` monitors, windows, hotkeys
+- `core.py` settings, devices, encoders · `project.py` scenes, sources and the FFmpeg graph · `namedstore.py` profiles and collections · `placement.py` drag maths · `preview.py` the preview area · `vcam.py` virtual camera
+- `engine.py` the running FFmpeg and its outputs · `session.py` what the buttons call · `loopback.py` system sound · `sysinfo.py` CPU and memory
+- `docklayout.py` where the docks are (pure logic) · `dockui.py` dragging and arranging · `gui.py` the window ·
+  `dialogs.py` Settings and Properties · `widgets.py` hand-drawn buttons, switches, faders, meters · `winutil.py` monitors, windows, hotkeys
 
-One FFmpeg captures every source, draws every layout, mixes the audio and encodes once. Layout changes, levels and
-mute are commands sent to that running FFmpeg. Its output is relayed to small `ffmpeg -c copy` processes, one saving
-the file and one sending the stream, so each can start and stop alone.
+One FFmpeg captures every source, draws every scene, mixes the audio and encodes once. Scene changes, visibility, volume
+and mute are commands sent to that running FFmpeg. Its output is relayed to the recording file and, when streaming, to a
+small `ffmpeg -c copy` process, so each can start and stop alone.
 
 MIT licensed, see `LICENSE`. Third-party notices in `THIRD_PARTY.md`.

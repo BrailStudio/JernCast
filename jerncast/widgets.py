@@ -259,3 +259,117 @@ class Pill(tk.Canvas):
         self.delete("all")
         self.create_polygon(rounded(0, 0, w, h, h / 2), smooth=True, fill=color, outline="")
         self.create_text(w / 2, h / 2, text=text, fill="#ffffff", font=self.font)
+
+
+class VLevel(tk.Canvas):
+    """A vertical audio level meter with a dB scale, like a mixer channel."""
+
+    def __init__(self, parent, *, surface, track, height=120, width=14, scale=1.0,
+                 colors=("#2fbf71", "#f0a93b", "#f0434f"), tick="#566074"):
+        super().__init__(parent, width=int(width * scale), height=int(height * scale), bg=surface,
+                         highlightthickness=0, bd=0)
+        self.w, self.h = int(width * scale), int(height * scale)
+        self.create_rectangle(0, 0, self.w, self.h, fill=track, outline="")
+        self._bars = [self.create_rectangle(0, self.h, self.w, self.h, fill=c, outline="") for c in colors]
+        for db in (0, -10, -20, -30, -40, -50):              # tick marks
+            y = self.h * (-db) / 60
+            self.create_line(0, y, self.w * 0.35, y, fill=tick)
+        self._last = -1
+
+    def set(self, frac: float) -> None:
+        frac = max(0.0, min(1.0, frac))
+        step = round(frac * 60)
+        if step == self._last:
+            return
+        self._last = step
+        top = self.h * (1 - step / 60)
+        green_top, amber_top = self.h * 0.3, self.h * 0.1        # above -18 dB turns amber, above -6 dB red
+        self.coords(self._bars[0], 0, max(top, green_top), self.w, self.h)
+        if top < green_top:
+            self.coords(self._bars[1], 0, max(top, amber_top), self.w, green_top)
+        else:
+            self.coords(self._bars[1], 0, 0, 0, 0)
+        if top < amber_top:
+            self.coords(self._bars[2], 0, top, self.w, amber_top)
+        else:
+            self.coords(self._bars[2], 0, 0, 0, 0)
+
+
+class VFader(tk.Canvas):
+    """A vertical volume fader, 0 to 200 percent."""
+
+    def __init__(self, parent, value, command=None, *, surface, track, accent, height=120, width=22, scale=1.0,
+                 lo=0, hi=200):
+        super().__init__(parent, width=int(width * scale), height=int(height * scale), bg=surface,
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self._s = scale
+        self.lo, self.hi, self.command = lo, hi, command
+        self.track, self.accent = track, accent
+        self.value = max(lo, min(hi, value))
+        self.bind("<Button-1>", self._drag)
+        self.bind("<B1-Motion>", self._drag)
+        self._draw()
+
+    def get(self):
+        return self.value
+
+    def set(self, value) -> None:
+        self.value = max(self.lo, min(self.hi, value))
+        self._draw()
+
+    def _drag(self, event) -> None:
+        h = int(self["height"])
+        pad = 8 * self._s
+        frac = 1 - max(0.0, min(1.0, (event.y - pad) / max(1, h - 2 * pad)))
+        self.value = round(self.lo + frac * (self.hi - self.lo))
+        self._draw()
+        if self.command:
+            self.command(self.value)
+
+    def _draw(self) -> None:
+        w, h = int(self["width"]), int(self["height"])
+        pad = 8 * self._s
+        frac = (self.value - self.lo) / max(1, self.hi - self.lo)
+        y = h - pad - frac * (h - 2 * pad)
+        x = w / 2
+        self.delete("all")
+        self.create_line(x, pad, x, h - pad, fill=self.track, width=int(3 * self._s))
+        self.create_line(x, y, x, h - pad, fill=self.accent, width=int(3 * self._s))
+        kw, kh = 9 * self._s, 5 * self._s
+        self.create_polygon(rounded(x - kw, y - kh, x + kw, y + kh, 3 * self._s), smooth=True, fill="#e8ecf4", outline="")
+
+
+class MuteButton(tk.Canvas):
+    """A small speaker icon; red with a cross while muted."""
+
+    def __init__(self, parent, variable, command=None, *, surface, scale=1.0, size=22):
+        super().__init__(parent, width=int(size * scale), height=int(size * scale), bg=surface,
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self._s, self.size = scale, int(size * scale)
+        self.var, self.command = variable, command
+        self.bind("<Button-1>", lambda _e: self.toggle())
+        try:
+            variable.trace_add("write", lambda *_: self._draw())
+        except Exception:
+            pass
+        self._draw()
+
+    def toggle(self) -> None:
+        self.var.set(not self.var.get())
+        self._draw()
+        if self.command:
+            self.command()
+
+    def _draw(self) -> None:
+        z = self.size
+        muted = bool(self.var.get())
+        colour = "#f0434f" if muted else "#aab3c5"
+        self.delete("all")
+        self.create_polygon(z * .18, z * .38, z * .36, z * .38, z * .56, z * .2, z * .56, z * .8,
+                            z * .36, z * .62, z * .18, z * .62, fill=colour, outline="")
+        if muted:
+            self.create_line(z * .64, z * .36, z * .88, z * .64, fill=colour, width=max(1, int(2 * self._s)))
+            self.create_line(z * .88, z * .36, z * .64, z * .64, fill=colour, width=max(1, int(2 * self._s)))
+        else:
+            self.create_arc(z * .5, z * .3, z * .86, z * .7, start=-50, extent=100, style="arc",
+                            outline=colour, width=max(1, int(2 * self._s)))

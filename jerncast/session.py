@@ -13,9 +13,10 @@ from pathlib import Path
 
 from .core import Settings, data_dir, redact, run, safe_name
 from . import loopback as loopback_module
+from . import vcam as vcam_module
 from .engine import Consumer, Engine, EngineError, FileConsumer
-from .project import (Project, build_plan, item_enabled, item_filter_name, volume_filter_name,
-                      effective_volume)
+from .project import (Project, box_pixels, build_plan, effective_volume, item_box, item_enabled,
+                      item_filter_name, overlay_position, scale_filter_name, volume_filter_name)
 
 log = logging.getLogger("jerncast")
 
@@ -42,9 +43,12 @@ class Session:
         self.record_path: Path | None = None
         self.last_recording: Path | None = None
         self.preview_wanted = False
+        self.vcam = None
+        self.vcam_factory = vcam_module.PyVirtualCam                    # tests replace this
         self._record_has_video = True
         self.loopback_factory = loopback_module.start_system_sound     # tests replace this
         self._sent: dict[tuple[int, int], bool] = {}
+        self._sent_boxes: dict[tuple[int, int], tuple] = {}     # where each source is in the running engine
         self._ops = threading.RLock()       # long actions: start/stop recording and streaming
         self._state = threading.RLock()     # quick live changes: scene, volume, mute
 
@@ -60,6 +64,10 @@ class Session:
     @property
     def streaming(self) -> bool:
         return self.stream is not None
+
+    @property
+    def vcam_running(self) -> bool:
+        return self.vcam is not None
 
     def record_seconds(self) -> float:
         return time.monotonic() - self.record.started_at if self.record else 0.0
@@ -110,14 +118,17 @@ class Session:
         with self._state:
             self.engine = engine
             self._sent = {}
+            self._sent_boxes = {}
+            cw, ch = self.settings.canvas_size
             for si, scene in enumerate(self.project.scenes):
                 for ii, item in enumerate(scene.items):
                     self._sent[(si, ii)] = item_enabled(self.project, si, item)
+                    self._sent_boxes[(si, ii)] = box_pixels(item_box(item, cw, ch), cw, ch)
         return True
 
     def _drop_dead_engine(self) -> None:
         engine, self.engine = self.engine, None
-        self.record = self.stream = None
+        self.record = self.stream = self.vcam = None
         if engine is not None:
             try:
                 engine.stop()
@@ -125,7 +136,8 @@ class Session:
                 log.exception("closing a dead engine failed")
 
     def _stop_engine_if_idle(self) -> None:
-        if self.engine is not None and not self.record and not self.stream and not self.preview_wanted:
+        if (self.engine is not None and not self.record and not self.stream and not self.vcam
+                and not self.preview_wanted):
             engine, self.engine = self.engine, None
             engine.stop()
 
@@ -250,6 +262,45 @@ class Session:
             consumer.close()
             self._stop_engine_if_idle()
 
+    # -- virtual camera ------------------------------------------------------
+    def start_vcam(self) -> None:
+        with self._ops:
+            if self.vcam:
+                return
+            if not self.project.has_video():
+                raise SessionError("The virtual camera needs a picture: add a display, window or webcam source.")
+            started = self._ensure_engine()
+            width, height = self.settings.canvas_size
+            try:
+                camera = self.vcam_factory(width, height, self.settings.fps)
+            except vcam_module.VCamError as exc:
+                self._rollback(started)
+                raise SessionError(str(exc)) from exc
+            consumer = vcam_module.VCamConsumer(self.ffmpeg, camera, width, height,
+                                                self._logs() / f"{_stamp()} vcam.log")
+            self.engine.add_consumer(consumer)
+            deadline = time.monotonic() + 6.0                  # wait for the first picture to arrive
+            while time.monotonic() < deadline and consumer.alive and consumer.frames == 0:
+                time.sleep(0.1)
+            if not consumer.alive or consumer.frames == 0:
+                message = consumer.problem()
+                self.engine.remove_consumer("vcam")
+                consumer.close()
+                self._rollback(started)
+                raise SessionError("The virtual camera did not start." + (f"\n\n{message}" if message else ""))
+            self.vcam = consumer
+
+    def stop_vcam(self) -> None:
+        with self._ops:
+            consumer = self.vcam
+            if consumer is None:
+                return
+            if self.engine:
+                self.engine.remove_consumer("vcam")
+            self.vcam = None
+            consumer.close()
+            self._stop_engine_if_idle()
+
     def _rollback(self, started_engine: bool) -> None:
         if started_engine:
             self._stop_engine_if_idle()
@@ -276,6 +327,28 @@ class Session:
                     if self.engine.send(item_filter_name(si, ii), "enable", "1" if want else "0"):
                         self._sent[(si, ii)] = want
 
+    def set_item_box(self, scene_name: str, index: int, box) -> None:
+        """Move / resize a source (box = x, y, w, h as fractions of the picture). Works live."""
+        with self._state:
+            scene = self.project.scene(scene_name)
+            item = scene.items[index]
+            item.layout, item.box = "free", [float(v) for v in box]
+            si = self.project.scenes.index(scene)
+            if self.engine is None or not self.engine.alive or (si, index) not in self._sent_boxes:
+                return
+            cw, ch = self.settings.canvas_size
+            new = box_pixels(item_box(item, cw, ch), cw, ch)
+            old = self._sent_boxes[(si, index)]
+            if new == old:
+                return
+            if new[2:] != old[2:]:                                  # the size changed too
+                self.engine.send(scale_filter_name(si, index), "width", str(new[2]))
+                self.engine.send(scale_filter_name(si, index), "height", str(new[3]))
+            x, y = overlay_position(*new)
+            self.engine.send(item_filter_name(si, index), "x", x)
+            self.engine.send(item_filter_name(si, index), "y", y)
+            self._sent_boxes[(si, index)] = new
+
     def set_volume(self, source_id: str, volume: float) -> None:
         with self._state:
             src = self.project.sources[source_id]
@@ -291,6 +364,17 @@ class Session:
     def _push_volume(self, src) -> None:
         if self.engine is not None and self.engine.alive:
             self.engine.send(volume_filter_name(src.id), "volume", f"{effective_volume(src):.3f}")
+
+    def pids(self) -> list[int]:
+        """Process ids JernCast started (for the memory readout)."""
+        found = []
+        engine = self.engine
+        if engine is not None and engine.proc is not None:
+            found.append(engine.proc.pid)
+        for consumer in (self.stream, self.vcam):
+            if consumer is not None and getattr(consumer, "proc", None) is not None:
+                found.append(consumer.proc.pid)
+        return found
 
     def meters(self) -> dict[str, float]:
         engine = self.engine
@@ -330,6 +414,11 @@ class Session:
                 messages.append("The live stream was disconnected (internet or server problem).\n"
                                 "Your recording, if one is running, is still going. Press Start "
                                 "Streaming to go live again.\n\n" + problem)
+            if self.vcam is not None and not self.vcam.alive:
+                engine.remove_consumer("vcam")
+                self.vcam.close()
+                self.vcam = None
+                messages.append("The virtual camera stopped. Press Start Virtual Camera to turn it on again.")
             if self.record is not None and not self.record.alive:
                 engine.remove_consumer("record")
                 path = self.record_path
@@ -344,6 +433,10 @@ class Session:
 
     def shutdown(self) -> None:
         with self._ops:
+            try:
+                self.stop_vcam()
+            except Exception:
+                log.exception("stop virtual camera failed")
             try:
                 self.stop_stream()
             except Exception:

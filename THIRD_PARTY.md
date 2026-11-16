@@ -10,5 +10,9 @@ JernCast's own code (the `jerncast` folder) is MIT licensed, see `LICENSE`.
 The installer's Python runtime and Tk are under the Python Software
 Foundation licence; PyInstaller is used to package the app.
 
+The optional virtual camera uses the **pyvirtualcam** package (https://github.com/letmaik/pyvirtualcam) with a
+virtual camera driver installed separately (OBS Studio or Unity Capture). It is not included unless you build with the
+virtual camera option; check its licence before you share such a build.
+
 System sound capture uses **PyAudioWPatch** (MIT licence, based on PyAudio and PortAudio), a Windows
 WASAPI loopback fork of PyAudio: https://github.com/s0d3s/PyAudioWPatch

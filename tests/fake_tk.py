@@ -66,6 +66,14 @@ class Widget:
         return lambda *a, **k: None
 
 
+class PhotoImage(Widget):
+    def width(self):
+        return 640
+
+    def height(self):
+        return 360
+
+
 class Style(Widget):
     def configure(self, *a, **k):
         pass
@@ -133,8 +141,8 @@ def install():
     tk = types.ModuleType("tkinter")
     tk.TclError = type("TclError", (Exception,), {})
     tk.StringVar = tk.BooleanVar = tk.IntVar = Var
-    for name, cls in (("Tk", Widget), ("Toplevel", Widget), ("Frame", Widget), ("Label", Widget), ("Menu", Widget),
-                      ("PhotoImage", Widget), ("Listbox", Listbox), ("Canvas", Canvas), ("Scale", Scale)):
+    for name, cls in (("Tk", Widget), ("Toplevel", Widget), ("Frame", Widget), ("PanedWindow", Widget), ("Label", Widget), ("Menu", Widget),
+                      ("PhotoImage", PhotoImage), ("Listbox", Listbox), ("Canvas", Canvas), ("Scale", Scale)):
         setattr(tk, name, cls)
     ttk = types.ModuleType("tkinter.ttk")
     ttk.Style = Style

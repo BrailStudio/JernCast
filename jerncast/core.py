@@ -84,6 +84,9 @@ class Settings:
     hotkey_record: str = "F9"
     hotkey_stream: str = "F10"
     compact: bool = False
+    live_preview: bool = False      # show the real picture in the preview (keeps capturing: uses CPU)
+    always_on_top: bool = False
+    studio_mode: bool = False       # edit the next scene in Preview, then Transition it to Program
     recent: list = dataclasses.field(default_factory=list)
 
     @property
@@ -95,8 +98,8 @@ class Settings:
         return w, h
 
     @classmethod
-    def load(cls) -> "Settings":
-        path = data_dir() / "settings.json"
+    def load(cls, path: Path | None = None) -> "Settings":
+        path = path or data_dir() / "settings.json"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             names = {f.name for f in dataclasses.fields(cls)}
@@ -104,12 +107,12 @@ class Settings:
         except Exception:  # missing or damaged file: start fresh
             return cls()
 
-    def save(self) -> None:
+    def save(self, path: Path | None = None) -> None:
         try:
             data = dataclasses.asdict(self)
             if not self.remember_key:
                 data["stream_key"] = ""
-            (data_dir() / "settings.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+            (path or data_dir() / "settings.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
         except OSError:
             log.exception("could not save settings")
 

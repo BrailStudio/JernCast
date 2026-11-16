@@ -76,10 +76,10 @@ class PlanTests(unittest.TestCase):
         self.assertIn("-offset_x 0 -offset_y 0 -video_size 1920x1080", text)
         self.assertIn("-i video=Cam A", text)
         self.assertIn("split=2", text)                                  # webcam used in two scenes
-        self.assertIn("overlay@ov0_0=x=(W-w)/2:y=(H-h)/2:enable=1", text)
-        self.assertIn("overlay@ov0_1=x=24:y=24:enable=1", text)         # corner, top-left
-        self.assertIn("overlay@ov1_0=x=(W-w)/2:y=(H-h)/2:enable=0", text)   # other scene is off
-        self.assertIn("scale=422:-2", text)                             # 33 percent of 1280
+        self.assertIn("overlay@ov0_0=x=0+(1280-w)/2:y=0+(720-h)/2:enable=1", text)
+        self.assertIn("overlay@ov0_1=x=24+(422-w)/2:y=24+(238-h)/2:enable=1", text)   # corner, top-left
+        self.assertIn("overlay@ov1_0=x=0+(1280-w)/2:y=0+(720-h)/2:enable=0", text)   # other scene is off
+        self.assertIn("scale@sc0_1=422:238:force_original_aspect_ratio=decrease", text)   # a 33 percent box
         self.assertIn("amix=inputs=2", text)
         self.assertIn("volume@vol_s4=volume=1.000", text)
         self.assertIn("direct=1", text)
@@ -94,14 +94,14 @@ class PlanTests(unittest.TestCase):
         p.scene("Scene").items[1].visible = False
         text = " ".join(self.plan(p).cmd)
         self.assertIn("volume@vol_s4=volume=0.000", text)
-        self.assertIn("overlay@ov0_1=x=24:y=24:enable=0", text)
+        self.assertIn("overlay@ov0_1=x=24+(422-w)/2:y=24+(238-h)/2:enable=0", text)
 
     def test_current_scene_decides_what_is_on(self):
         p = sample()
         p.current = "Just me"
         text = " ".join(self.plan(p).cmd)
-        self.assertIn("overlay@ov0_0=x=(W-w)/2:y=(H-h)/2:enable=0", text)
-        self.assertIn("overlay@ov1_0=x=(W-w)/2:y=(H-h)/2:enable=1", text)
+        self.assertIn("overlay@ov0_0=x=0+(1280-w)/2:y=0+(720-h)/2:enable=0", text)
+        self.assertIn("overlay@ov1_0=x=0+(1280-w)/2:y=0+(720-h)/2:enable=1", text)
 
     def test_no_preview_option_and_cursor_and_loopback(self):
         p = Project.default()
@@ -122,6 +122,22 @@ class PlanTests(unittest.TestCase):
         text = " ".join(build_plan("ffmpeg", p, Settings(), "libx264", MON, loopback=(1, 48000, 2)).cmd)
         self.assertNotIn("thread_queue_size", text)
         self.assertIn("-i audio=Mic A", text)
+
+    def test_free_box_and_pixels(self):
+        from jerncast.project import SceneItem, box_pixels, item_box, overlay_position
+        item = SceneItem("s1", layout="free", box=[0.1, 0.2, 0.5, 0.25])
+        self.assertEqual(item_box(item), (0.1, 0.2, 0.5, 0.25))
+        self.assertEqual(box_pixels(item_box(item), 1280, 720), (128, 144, 640, 180))
+        self.assertEqual(box_pixels((0.0, 0.0, 0.0001, 0.0001), 1280, 720)[2:], (2, 2))      # never zero size
+        self.assertEqual(overlay_position(128, 144, 640, 180), ("128+(640-w)/2", "144+(180-h)/2"))
+        self.assertEqual(item_box(SceneItem("s1", layout="free")), (0.0, 0.0, 1.0, 1.0))      # no box: fill
+        p = Project.default()
+        p.scenes[0].items[0].layout, p.scenes[0].items[0].box = "free", [0.25, 0.25, 0.5, 0.5]
+        text = " ".join(self.plan(p).cmd)
+        self.assertIn("scale@sc0_0=640:360", text)
+        self.assertIn("overlay@ov0_0=x=320+(640-w)/2:y=180+(360-h)/2", text)
+        again = Project.from_dict(p.to_dict())                                                  # saved and loaded
+        self.assertEqual(again.scenes[0].items[0].box, [0.25, 0.25, 0.5, 0.5])
 
     def test_corner_size_can_be_a_percent(self):
         from jerncast.project import corner_fraction
@@ -150,7 +166,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(rects[0][1:], (0, 0, 640, 360))
         name, x0, y0, x1, y1 = rects[1]
         self.assertEqual(name, "Webcam")
-        self.assertEqual((x0, y0), (12, 12))                 # top-left corner with a small margin
+        self.assertEqual((x0, y0), (24, 24))                 # top-left corner with a small margin
         p.scene("Scene").items[1].visible = False
         self.assertEqual(len(layout_rects(p, p.scene("Scene"), 640, 360)), 1)
 

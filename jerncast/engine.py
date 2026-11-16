@@ -33,7 +33,7 @@ class Consumer:
     """A `ffmpeg -c copy` process fed from the engine's stream."""
 
     def __init__(self, name: str, cmd: list[str], log_path: Path, *, droppable: bool,
-                 secrets=()):
+                 secrets=(), stdout=None):
         self.name = name
         self.log_path = log_path
         self.secrets = [s for s in secrets if s]
@@ -43,7 +43,8 @@ class Consumer:
         self.started_at = time.monotonic()
         log.info("starting %s: %s", name, redact(subprocess.list2cmdline(cmd), self.secrets))
         self._logfile = open(log_path, "wb")
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                     stdout=subprocess.DEVNULL if stdout is None else stdout,
                                      stderr=self._logfile, creationflags=CREATE_NO_WINDOW)
         self._queue: queue.Queue = queue.Queue(maxsize=300)     # about 13 MB of video
         self._thread = threading.Thread(target=self._write_loop, daemon=True)

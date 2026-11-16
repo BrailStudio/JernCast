@@ -5,6 +5,11 @@ name: JernCast Windows installer
 
 on:
   workflow_dispatch:
+    inputs:
+      include_virtual_camera:
+        description: 'Include the pyvirtualcam package (virtual camera). Check its licence before sharing the build.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,12 +46,15 @@ jobs:
 
       - name: Build app and installer
         shell: pwsh
-        run: scripts\build-windows.ps1 -Installer
+        run: |
+          $extra = @()
+          if ('${{ inputs.include_virtual_camera }}' -eq 'true') { $extra += '-WithVirtualCamera' }
+          scripts\build-windows.ps1 -Installer @extra
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Jerncast-0.0.2-Setup
-          path: dist/Jerncast-0.0.2-Setup.exe
+          name: Jerncast-0.0.3-Setup
+          path: dist/Jerncast-0.0.3-Setup.exe
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4

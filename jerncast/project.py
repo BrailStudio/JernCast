@@ -71,6 +71,7 @@ class SceneItem:
     layout: str = "fill"        # fill | corner
     corner: str = "bottom-right"
     size: str = "medium"
+    box: list | None = None     # [x, y, w, h] as fractions of the picture, used when layout == "free"
 
 
 @dataclasses.dataclass
@@ -157,6 +158,14 @@ class Project:
             self.current = self.scenes[0].name
         self._drop_unused_video_sources()
 
+    def move_scene(self, name: str, delta: int) -> int:
+        index = [s.name for s in self.scenes].index(name)
+        new = index + delta
+        if 0 <= new < len(self.scenes):
+            self.scenes[index], self.scenes[new] = self.scenes[new], self.scenes[index]
+            return new
+        return index
+
     # -- sources ----------------------------------------------------------
     def add_source(self, kind: str, name: str = "", device: str = "") -> SourceDef:
         n = 1
@@ -218,18 +227,31 @@ class Project:
         return p
 
     @classmethod
-    def load(cls) -> "Project":
+    def load(cls, path: Path | None = None) -> "Project":
         try:
-            return cls.from_dict(json.loads((data_dir() / "project.json").read_text(encoding="utf-8")))
+            return cls.from_dict(json.loads((path or data_dir() / "project.json").read_text(encoding="utf-8")))
         except Exception:
             return cls.default()
 
-    def save(self) -> None:
+    def save(self, path: Path | None = None) -> None:
         try:
-            (data_dir() / "project.json").write_text(json.dumps(self.to_dict(), indent=2),
-                                                     encoding="utf-8")
+            (path or data_dir() / "project.json").write_text(json.dumps(self.to_dict(), indent=2),
+                                                             encoding="utf-8")
         except OSError:
             log.exception("could not save project")
+
+
+def sync_global_audio(project: Project, settings: Settings) -> None:
+    """Make the 'Desktop Audio' and 'Mic/Aux' mixer channels match the devices chosen in Settings."""
+    for sid, name, device in (("desktop", "Desktop Audio", settings.desktop), ("mic", "Mic/Aux", settings.mic)):
+        if not device:
+            project.sources.pop(sid, None)
+            continue
+        kind = "loopback" if (sid == "desktop" and device == "loopback") else "audio"
+        value = "" if kind == "loopback" else device
+        old = project.sources.get(sid)
+        project.sources[sid] = SourceDef(sid, kind, name, value, old.volume if old else 1.0,
+                                         old.muted if old else False)
 
 
 # --------------------------------------------------------------------------
@@ -303,6 +325,38 @@ def item_filter_name(scene_index: int, item_index: int) -> str:
     return f"overlay@ov{scene_index}_{item_index}"
 
 
+def scale_filter_name(scene_index: int, item_index: int) -> str:
+    return f"scale@sc{scene_index}_{item_index}"
+
+
+def item_box(item: SceneItem, canvas_w: int = 1280, canvas_h: int = 720) -> tuple[float, float, float, float]:
+    """Where a source sits, as (x, y, w, h) fractions of the picture. The source is fitted inside this box."""
+    if item.layout == "free" and item.box and len(item.box) == 4:
+        x, y, w, h = (float(v) for v in item.box)
+        return x, y, max(0.02, w), max(0.02, h)
+    if item.layout == "corner":
+        w = corner_fraction(item.size)
+        h = w * (canvas_w / canvas_h) * 9 / 16               # a 16:9 box; other shapes are fitted inside it
+        mx, my = 24 / canvas_w, 24 / canvas_h
+        x = mx if "left" in item.corner else 1 - w - mx
+        y = my if "top" in item.corner else 1 - h - my
+        return x, y, w, h
+    return 0.0, 0.0, 1.0, 1.0
+
+
+def box_pixels(box, canvas_w: int, canvas_h: int) -> tuple[int, int, int, int]:
+    """(x, y, w, h) in picture pixels; the size is even and at least 2."""
+    x, y, w, h = box
+    bw = max(2, int(round(w * canvas_w)) // 2 * 2)
+    bh = max(2, int(round(h * canvas_h)) // 2 * 2)
+    return int(round(x * canvas_w)), int(round(y * canvas_h)), bw, bh
+
+
+def overlay_position(bx: int, by: int, bw: int, bh: int) -> tuple[str, str]:
+    """Overlay x / y expressions that centre the (fitted) source inside its box."""
+    return f"{bx}+({bw}-w)/2", f"{by}+({bh}-h)/2"
+
+
 def volume_filter_name(source_id: str) -> str:
     return f"volume@vol_{source_id}"
 
@@ -374,14 +428,9 @@ def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
             for ii, item in enumerate(scene.items):
                 if (si, ii) not in branch:
                     continue
-                if item.layout == "corner":
-                    width = int(cw * corner_fraction(item.size)) // 2 * 2
-                    scale = f"scale={width}:-2,setsar=1"
-                    pos = CORNER_POS.get(item.corner, CORNER_POS["bottom-right"])
-                    x, y = pos.split(":")
-                else:
-                    scale = (f"scale={cw}:{ch}:force_original_aspect_ratio=decrease,setsar=1")
-                    x, y = "(W-w)/2", "(H-h)/2"
+                bx, by, bw, bh = box_pixels(item_box(item, cw, ch), cw, ch)
+                scale = (f"{scale_filter_name(si, ii)}={bw}:{bh}:force_original_aspect_ratio=decrease,setsar=1")
+                x, y = overlay_position(bx, by, bw, bh)
                 enable = 1 if item_enabled(project, si, item) else 0
                 graph.append(f"[{branch[(si, ii)]}]{scale}[i{si}_{ii}]")
                 out = f"o{si}_{ii}"
@@ -390,7 +439,7 @@ def build_plan(ffmpeg: str, project: Project, settings: Settings, encoder: str,
                 last = out
         if preview:
             graph.append(f"[{last}]format={pix},split=2[v][pv0]")
-            graph.append("[pv0]fps=3,scale=480:-2:flags=fast_bilinear,format=rgb24[pv]")
+            graph.append("[pv0]fps=3,scale=640:-2:flags=fast_bilinear,format=rgb24[pv]")
         else:
             graph.append(f"[{last}]format={pix}[v]")
         maps += ["-map", "[v]"]
@@ -448,13 +497,6 @@ def layout_rects(project: Project, scene: Scene, width: int, height: int) -> lis
         src = project.sources.get(item.source)
         if src is None or not item.visible:
             continue
-        if item.layout == "corner":
-            w = int(width * corner_fraction(item.size))
-            h = int(w * 9 / 16)
-            m = int(width * 0.02)
-            x0 = m if "left" in item.corner else width - w - m
-            y0 = m if "top" in item.corner else height - h - m
-            rects.append((src.name, x0, y0, x0 + w, y0 + h))
-        else:
-            rects.append((src.name, 0, 0, width, height))
+        x, y, w, h = item_box(item, width, height)
+        rects.append((src.name, int(x * width), int(y * height), int((x + w) * width), int((y + h) * height)))
     return rects
